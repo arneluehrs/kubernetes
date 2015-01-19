@@ -134,13 +134,16 @@ find-object-url() {
   openstack-set-vars
 
   KUBE_TAR=${CLOUDFILES_CONTAINER}/${CONTAINER_PREFIX}/kubernetes-server-linux-amd64.tar.gz
-  #MY_KEY="secret"
+  MY_KEY="secret"
   #swift --os-auth-url ${OS_AUTH_URL} --os-username ${OS_USERNAME} --os-password ${OS_PASSWORD} post -m "X-Account-Meta-Temp-URL-Key: ${MY_KEY}"
 
   RELEASE_TMP_URL=$(swift --os-auth-url ${OS_AUTH_URL} --os-username ${OS_USERNAME} --os-password ${OS_PASSWORD} tempurl GET 3600 ${KUBE_TAR} ${MY_KEY})
-  RELEASE_TMP_URL="https://region-b.geo-1.objects.hpcloudsvc.com/v1/10820682209898${RELEASE_TMP_URL}"
+  RELEASE_TMP_URL="https://region-b.geo-1.objects.hpcloudsvc.com/v1/10820682209898/${RELEASE_TMP_URL}"
   echo "cluster/openstack/util.sh: Object temp URL:"
   echo -e "\t${RELEASE_TMP_URL}"
+  release=v0.7.2
+  release_url=https://storage.googleapis.com/kubernetes-release/release/${release}/kubernetes.tar.gz
+  RELEASE_TMP_URL=$release_url
 
 
 }
@@ -150,7 +153,7 @@ ensure_dev_container() {
   SWIFT_CMD="swift --os-auth-url ${OS_AUTH_URL} --os-username ${OS_USERNAME} --os-password ${OS_PASSWORD}"
 
   if ! ${SWIFT_CMD} list ${CLOUDFILES_CONTAINER} > /dev/null 2>&1 ; then
-    echo "cluster/openstack/util.sh: Container doesn't exist. Creating container ${KUBE_OPENSTACK_RELEASE_BUCKET}"
+    echo "cluster/openstack/util.sh: Container doesn't exist. Creating container ${CLOUDFILES_CONTAINER}"
     echo ${SWIFT_CMD} post ${CLOUDFILES_CONTAINER}
     ${SWIFT_CMD} post ${CLOUDFILES_CONTAINER} > /dev/null 2>&1
   fi
@@ -163,8 +166,8 @@ copy_dev_tarballs() {
   echo ${SWIFT_CMD} upload --skip-identical --object-name kubernetes-server-linux-amd64.tar.gz ${CLOUDFILES_CONTAINER}/${CONTAINER_PREFIX} \
   ${RELEASE_DIR}/kubernetes-server-linux-amd64.tar.gz
 
-  ${SWIFT_CMD} upload --skip-identical --object-name kubernetes-server-linux-amd64.tar.gz ${CLOUDFILES_CONTAINER}/${CONTAINER_PREFIX} \
-  ${RELEASE_DIR}/kubernetes-server-linux-amd64.tar.gz > /dev/null 2>&1
+  #${SWIFT_CMD} upload --skip-identical --object-name kubernetes-server-linux-amd64.tar.gz ${CLOUDFILES_CONTAINER}/${CONTAINER_PREFIX} \
+  #${RELEASE_DIR}/kubernetes-server-linux-amd64.tar.gz > /dev/null 2>&1
 
   echo "Release pushed."
 }
@@ -191,6 +194,7 @@ openstack-boot-master() {
 --meta '${MASTER_TAG}' \
 --meta 'ETCD=${DISCOVERY_ID}' \
 --user-data ${KUBE_TEMP}/master-cloud-config.yaml \
+--config-drive true \
 --nic net-id=${NETWORK_UUID} \
 ${MASTER_NAME}"
 
@@ -238,6 +242,7 @@ openstack-boot-minions() {
 --image ${KUBE_IMAGE} \
 --meta ${MINION_TAG} \
 --user-data ${KUBE_TEMP}/minion-cloud-config-$(( i +1 )).yaml \
+--config-drive true \
 --nic net-id=${NETWORK_UUID} \
 ${MINION_NAMES[$i]}"
 
@@ -423,6 +428,24 @@ function setup-logging {
 
 function teardown-logging {
   echo "TODO: teardown logging"
+}
+
+function kube-down {
+  echo "TODO: kube-down logging"
+
+  MASTER_DELETE_CMD="nova delete ${MASTER_NAME}"
+
+  for (( i=0; i<${#MINION_NAMES[@]}; i++)); do
+    MINION_DELETE_CMD="nova delete ${MINION_NAMES[$i]}"
+
+    echo "cluster/openstack/util.sh: Deleting ${MINION_NAMES[$i]} with following command:"
+    echo -e "\t$MINION_DELETE_CMD"
+    $MINION_DELETE_CMD
+  done
+
+  echo "cluster/openstack/util.sh: Deleting ${MASTER_NAME} with following command:"
+  echo -e "\t$MASTER_DELETE_CMD"
+  $MASTER_DELETE_CMD
 }
 
 # Perform preparations required to run e2e tests
