@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,7 +30,7 @@ type instrumentedDockerInterface struct {
 }
 
 // Creates an instrumented DockerInterface from an existing DockerInterface.
-func newInstrumentedDockerInterface(dockerClient DockerInterface) DockerInterface {
+func NewInstrumentedDockerInterface(dockerClient DockerInterface) DockerInterface {
 	return instrumentedDockerInterface{
 		client: dockerClient,
 	}
@@ -38,13 +38,18 @@ func newInstrumentedDockerInterface(dockerClient DockerInterface) DockerInterfac
 
 // recordOperation records the duration of the operation.
 func recordOperation(operation string, start time.Time) {
+	metrics.DockerOperations.WithLabelValues(operation).Inc()
 	metrics.DockerOperationsLatency.WithLabelValues(operation).Observe(metrics.SinceInMicroseconds(start))
 }
 
 // recordError records error for metric if an error occurred.
 func recordError(operation string, err error) {
 	if err != nil {
-		metrics.DockerErrors.WithLabelValues(operation).Inc()
+		if _, ok := err.(operationTimeout); ok {
+			metrics.DockerOperationsTimeout.WithLabelValues(operation).Inc()
+		}
+		// Docker operation timeout error is also a docker error, so we don't add else here.
+		metrics.DockerOperationsErrors.WithLabelValues(operation).Inc()
 	}
 }
 
@@ -102,11 +107,20 @@ func (in instrumentedDockerInterface) RemoveContainer(id string, opts dockertype
 	return err
 }
 
-func (in instrumentedDockerInterface) InspectImage(image string) (*dockertypes.ImageInspect, error) {
+func (in instrumentedDockerInterface) InspectImageByRef(image string) (*dockertypes.ImageInspect, error) {
 	const operation = "inspect_image"
 	defer recordOperation(operation, time.Now())
 
-	out, err := in.client.InspectImage(image)
+	out, err := in.client.InspectImageByRef(image)
+	recordError(operation, err)
+	return out, err
+}
+
+func (in instrumentedDockerInterface) InspectImageByID(image string) (*dockertypes.ImageInspect, error) {
+	const operation = "inspect_image"
+	defer recordOperation(operation, time.Now())
+
+	out, err := in.client.InspectImageByID(image)
 	recordError(operation, err)
 	return out, err
 }
@@ -207,4 +221,22 @@ func (in instrumentedDockerInterface) ImageHistory(id string) ([]dockertypes.Ima
 	out, err := in.client.ImageHistory(id)
 	recordError(operation, err)
 	return out, err
+}
+
+func (in instrumentedDockerInterface) ResizeExecTTY(id string, height, width int) error {
+	const operation = "resize_exec"
+	defer recordOperation(operation, time.Now())
+
+	err := in.client.ResizeExecTTY(id, height, width)
+	recordError(operation, err)
+	return err
+}
+
+func (in instrumentedDockerInterface) ResizeContainerTTY(id string, height, width int) error {
+	const operation = "resize_container"
+	defer recordOperation(operation, time.Now())
+
+	err := in.client.ResizeContainerTTY(id, height, width)
+	recordError(operation, err)
+	return err
 }

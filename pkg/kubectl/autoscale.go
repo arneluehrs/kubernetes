@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,12 +21,8 @@ import (
 	"strconv"
 
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/apis/extensions"
+	"k8s.io/kubernetes/pkg/apis/autoscaling"
 	"k8s.io/kubernetes/pkg/runtime"
-)
-
-const (
-	scaleSubResource = "scale"
 )
 
 type HorizontalPodAutoscalerV1Beta1 struct{}
@@ -46,6 +42,29 @@ func (HorizontalPodAutoscalerV1Beta1) ParamNames() []GeneratorParam {
 }
 
 func (HorizontalPodAutoscalerV1Beta1) Generate(genericParams map[string]interface{}) (runtime.Object, error) {
+	return generateHPA(genericParams)
+}
+
+type HorizontalPodAutoscalerV1 struct{}
+
+func (HorizontalPodAutoscalerV1) ParamNames() []GeneratorParam {
+	return []GeneratorParam{
+		{"default-name", true},
+		{"name", false},
+		{"scaleRef-kind", false},
+		{"scaleRef-name", false},
+		{"scaleRef-apiVersion", false},
+		{"min", false},
+		{"max", true},
+		{"cpu-percent", false},
+	}
+}
+
+func (HorizontalPodAutoscalerV1) Generate(genericParams map[string]interface{}) (runtime.Object, error) {
+	return generateHPA(genericParams)
+}
+
+func generateHPA(genericParams map[string]interface{}) (runtime.Object, error) {
 	params := map[string]string{}
 	for key, value := range genericParams {
 		strVal, isString := value.(string)
@@ -78,6 +97,11 @@ func (HorizontalPodAutoscalerV1Beta1) Generate(genericParams map[string]interfac
 	if err != nil {
 		return nil, err
 	}
+
+	if min > max {
+		return nil, fmt.Errorf("'max' must be greater than or equal to 'min'.")
+	}
+
 	cpuString, found := params["cpu-percent"]
 	cpu := -1
 	if found {
@@ -86,16 +110,15 @@ func (HorizontalPodAutoscalerV1Beta1) Generate(genericParams map[string]interfac
 		}
 	}
 
-	scaler := extensions.HorizontalPodAutoscaler{
+	scaler := autoscaling.HorizontalPodAutoscaler{
 		ObjectMeta: api.ObjectMeta{
 			Name: name,
 		},
-		Spec: extensions.HorizontalPodAutoscalerSpec{
-			ScaleRef: extensions.SubresourceReference{
-				Kind:        params["scaleRef-kind"],
-				Name:        params["scaleRef-name"],
-				APIVersion:  params["scaleRef-apiVersion"],
-				Subresource: scaleSubResource,
+		Spec: autoscaling.HorizontalPodAutoscalerSpec{
+			ScaleTargetRef: autoscaling.CrossVersionObjectReference{
+				Kind:       params["scaleRef-kind"],
+				Name:       params["scaleRef-name"],
+				APIVersion: params["scaleRef-apiVersion"],
 			},
 			MaxReplicas: int32(max),
 		},
@@ -105,7 +128,8 @@ func (HorizontalPodAutoscalerV1Beta1) Generate(genericParams map[string]interfac
 		scaler.Spec.MinReplicas = &v
 	}
 	if cpu >= 0 {
-		scaler.Spec.CPUUtilization = &extensions.CPUTargetUtilization{TargetPercentage: int32(cpu)}
+		c := int32(cpu)
+		scaler.Spec.TargetCPUUtilizationPercentage = &c
 	}
 	return &scaler, nil
 }

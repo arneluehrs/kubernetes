@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package e2e
 
 import (
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net"
 	"os/exec"
@@ -27,9 +28,11 @@ import (
 	"syscall"
 	"time"
 
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/v1"
+	utilversion "k8s.io/kubernetes/pkg/util/version"
 	"k8s.io/kubernetes/pkg/util/wait"
 	"k8s.io/kubernetes/test/e2e/framework"
+	testutils "k8s.io/kubernetes/test/utils"
 
 	. "github.com/onsi/ginkgo"
 )
@@ -39,20 +42,38 @@ const (
 )
 
 // TODO support other ports besides 80
-var portForwardRegexp = regexp.MustCompile("Forwarding from 127.0.0.1:([0-9]+) -> 80")
+var (
+	portForwardRegexp        = regexp.MustCompile("Forwarding from 127.0.0.1:([0-9]+) -> 80")
+	portForwardPortToStdOutV = utilversion.MustParseSemantic("v1.3.0-alpha.4")
+)
 
-func pfPod(expectedClientData, chunks, chunkSize, chunkIntervalMillis string) *api.Pod {
-	return &api.Pod{
-		ObjectMeta: api.ObjectMeta{
+func pfPod(expectedClientData, chunks, chunkSize, chunkIntervalMillis string) *v1.Pod {
+	return &v1.Pod{
+		ObjectMeta: v1.ObjectMeta{
 			Name:   podName,
 			Labels: map[string]string{"name": podName},
 		},
-		Spec: api.PodSpec{
-			Containers: []api.Container{
+		Spec: v1.PodSpec{
+			Containers: []v1.Container{
+				{
+					Name:  "readiness",
+					Image: "gcr.io/google_containers/netexec:1.7",
+					ReadinessProbe: &v1.Probe{
+						Handler: v1.Handler{
+							Exec: &v1.ExecAction{
+								Command: []string{
+									"sh", "-c", "netstat -na | grep LISTEN | grep -v 8080 | grep 80",
+								}},
+						},
+						InitialDelaySeconds: 5,
+						TimeoutSeconds:      60,
+						PeriodSeconds:       1,
+					},
+				},
 				{
 					Name:  "portforwardtester",
-					Image: "gcr.io/google_containers/portforwardtester:1.0",
-					Env: []api.EnvVar{
+					Image: "gcr.io/google_containers/portforwardtester:1.2",
+					Env: []v1.EnvVar{
 						{
 							Name:  "BIND_PORT",
 							Value: "80",
@@ -76,9 +97,18 @@ func pfPod(expectedClientData, chunks, chunkSize, chunkIntervalMillis string) *a
 					},
 				},
 			},
-			RestartPolicy: api.RestartPolicyNever,
+			RestartPolicy: v1.RestartPolicyNever,
 		},
 	}
+}
+
+func WaitForTerminatedContainer(f *framework.Framework, pod *v1.Pod, containerName string) error {
+	return framework.WaitForPodCondition(f.ClientSet, f.Namespace.Name, pod.Name, "container terminated", framework.PodStartTimeout, func(pod *v1.Pod) (bool, error) {
+		if len(testutils.TerminatedContainers(pod)[containerName]) > 0 {
+			return true, nil
+		}
+		return false, nil
+	})
 }
 
 type portForwardCommand struct {
@@ -124,15 +154,28 @@ func runPortForward(ns, podName string, port int) *portForwardCommand {
 	// by the port-forward command. We don't want to hard code the port as we have no
 	// way of guaranteeing we can pick one that isn't in use, particularly on Jenkins.
 	framework.Logf("starting port-forward command and streaming output")
-	stdout, _, err := framework.StartCmdAndStreamOutput(cmd)
+	stdout, stderr, err := framework.StartCmdAndStreamOutput(cmd)
 	if err != nil {
 		framework.Failf("Failed to start port-forward command: %v", err)
 	}
 
 	buf := make([]byte, 128)
+
+	// After v1.3.0-alpha.4 (#17030), kubectl port-forward outputs port
+	// info to stdout, not stderr, so for version-skewed tests, look there
+	// instead.
+	var portOutput io.ReadCloser
+	if useStdOut, err := framework.KubectlVersionGTE(portForwardPortToStdOutV); err != nil {
+		framework.Failf("Failed to get kubectl version: %v", err)
+	} else if useStdOut {
+		portOutput = stdout
+	} else {
+		portOutput = stderr
+	}
+
 	var n int
 	framework.Logf("reading from `kubectl port-forward` command's stdout")
-	if n, err = stdout.Read(buf); err != nil {
+	if n, err = portOutput.Read(buf); err != nil {
 		framework.Failf("Failed to read from kubectl port-forward stdout: %v", err)
 	}
 	portForwardOutput := string(buf[:n])
@@ -159,12 +202,20 @@ var _ = framework.KubeDescribe("Port forwarding", func() {
 		It("should support a client that connects, sends no data, and disconnects [Conformance]", func() {
 			By("creating the target pod")
 			pod := pfPod("abc", "1", "1", "1")
-			if _, err := f.Client.Pods(f.Namespace.Name).Create(pod); err != nil {
+			if _, err := f.ClientSet.Core().Pods(f.Namespace.Name).Create(pod); err != nil {
 				framework.Failf("Couldn't create pod: %v", err)
 			}
-			if err := f.WaitForPodRunning(pod.Name); err != nil {
+			if err := f.WaitForPodReady(pod.Name); err != nil {
 				framework.Failf("Pod did not start running: %v", err)
 			}
+			defer func() {
+				logs, err := framework.GetPodLogs(f.ClientSet, f.Namespace.Name, pod.Name, "portforwardtester")
+				if err != nil {
+					framework.Logf("Error getting pod log: %v", err)
+				} else {
+					framework.Logf("Pod log:\n%s", logs)
+				}
+			}()
 
 			By("Running 'kubectl port-forward'")
 			cmd := runPortForward(f.Namespace.Name, pod.Name, 80)
@@ -180,17 +231,15 @@ var _ = framework.KubeDescribe("Port forwarding", func() {
 			conn.Close()
 
 			By("Waiting for the target pod to stop running")
-			if err := f.WaitForPodNoLongerRunning(pod.Name); err != nil {
-				framework.Failf("Pod did not stop running: %v", err)
-			}
-
-			By("Retrieving logs from the target pod")
-			logOutput, err := framework.GetPodLogs(f.Client, f.Namespace.Name, pod.Name, "portforwardtester")
-			if err != nil {
-				framework.Failf("Error retrieving logs: %v", err)
+			if err := WaitForTerminatedContainer(f, pod, "portforwardtester"); err != nil {
+				framework.Failf("Container did not terminate: %v", err)
 			}
 
 			By("Verifying logs")
+			logOutput, err := framework.GetPodLogs(f.ClientSet, f.Namespace.Name, pod.Name, "portforwardtester")
+			if err != nil {
+				framework.Failf("Error retrieving pod logs: %v", err)
+			}
 			verifyLogMessage(logOutput, "Accepted client connection")
 			verifyLogMessage(logOutput, "Expected to read 3 bytes from client, but got 0 instead")
 		})
@@ -198,12 +247,20 @@ var _ = framework.KubeDescribe("Port forwarding", func() {
 		It("should support a client that connects, sends data, and disconnects [Conformance]", func() {
 			By("creating the target pod")
 			pod := pfPod("abc", "10", "10", "100")
-			if _, err := f.Client.Pods(f.Namespace.Name).Create(pod); err != nil {
+			if _, err := f.ClientSet.Core().Pods(f.Namespace.Name).Create(pod); err != nil {
 				framework.Failf("Couldn't create pod: %v", err)
 			}
-			if err := f.WaitForPodRunning(pod.Name); err != nil {
+			if err := f.WaitForPodReady(pod.Name); err != nil {
 				framework.Failf("Pod did not start running: %v", err)
 			}
+			defer func() {
+				logs, err := framework.GetPodLogs(f.ClientSet, f.Namespace.Name, pod.Name, "portforwardtester")
+				if err != nil {
+					framework.Logf("Error getting pod log: %v", err)
+				} else {
+					framework.Logf("Pod log:\n%s", logs)
+				}
+			}()
 
 			By("Running 'kubectl port-forward'")
 			cmd := runPortForward(f.Namespace.Name, pod.Name, 80)
@@ -240,17 +297,15 @@ var _ = framework.KubeDescribe("Port forwarding", func() {
 			}
 
 			By("Waiting for the target pod to stop running")
-			if err := f.WaitForPodNoLongerRunning(pod.Name); err != nil {
-				framework.Failf("Pod did not stop running: %v", err)
-			}
-
-			By("Retrieving logs from the target pod")
-			logOutput, err := framework.GetPodLogs(f.Client, f.Namespace.Name, pod.Name, "portforwardtester")
-			if err != nil {
-				framework.Failf("Error retrieving logs: %v", err)
+			if err := WaitForTerminatedContainer(f, pod, "portforwardtester"); err != nil {
+				framework.Failf("Container did not terminate: %v", err)
 			}
 
 			By("Verifying logs")
+			logOutput, err := framework.GetPodLogs(f.ClientSet, f.Namespace.Name, pod.Name, "portforwardtester")
+			if err != nil {
+				framework.Failf("Error retrieving pod logs: %v", err)
+			}
 			verifyLogMessage(logOutput, "^Accepted client connection$")
 			verifyLogMessage(logOutput, "^Received expected client data$")
 			verifyLogMessage(logOutput, "^Done$")
@@ -260,12 +315,20 @@ var _ = framework.KubeDescribe("Port forwarding", func() {
 		It("should support a client that connects, sends no data, and disconnects [Conformance]", func() {
 			By("creating the target pod")
 			pod := pfPod("", "10", "10", "100")
-			if _, err := f.Client.Pods(f.Namespace.Name).Create(pod); err != nil {
+			if _, err := f.ClientSet.Core().Pods(f.Namespace.Name).Create(pod); err != nil {
 				framework.Failf("Couldn't create pod: %v", err)
 			}
-			if err := f.WaitForPodRunning(pod.Name); err != nil {
+			if err := f.WaitForPodReady(pod.Name); err != nil {
 				framework.Failf("Pod did not start running: %v", err)
 			}
+			defer func() {
+				logs, err := framework.GetPodLogs(f.ClientSet, f.Namespace.Name, pod.Name, "portforwardtester")
+				if err != nil {
+					framework.Logf("Error getting pod log: %v", err)
+				} else {
+					framework.Logf("Pod log:\n%s", logs)
+				}
+			}()
 
 			By("Running 'kubectl port-forward'")
 			cmd := runPortForward(f.Namespace.Name, pod.Name, 80)
@@ -292,17 +355,15 @@ var _ = framework.KubeDescribe("Port forwarding", func() {
 			}
 
 			By("Waiting for the target pod to stop running")
-			if err := f.WaitForPodNoLongerRunning(pod.Name); err != nil {
-				framework.Failf("Pod did not stop running: %v", err)
-			}
-
-			By("Retrieving logs from the target pod")
-			logOutput, err := framework.GetPodLogs(f.Client, f.Namespace.Name, pod.Name, "portforwardtester")
-			if err != nil {
-				framework.Failf("Error retrieving logs: %v", err)
+			if err := WaitForTerminatedContainer(f, pod, "portforwardtester"); err != nil {
+				framework.Failf("Container did not terminate: %v", err)
 			}
 
 			By("Verifying logs")
+			logOutput, err := framework.GetPodLogs(f.ClientSet, f.Namespace.Name, pod.Name, "portforwardtester")
+			if err != nil {
+				framework.Failf("Error retrieving pod logs: %v", err)
+			}
 			verifyLogMessage(logOutput, "Accepted client connection")
 			verifyLogMessage(logOutput, "Done")
 		})

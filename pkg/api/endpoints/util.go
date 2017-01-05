@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,18 +27,6 @@ import (
 	"k8s.io/kubernetes/pkg/types"
 	hashutil "k8s.io/kubernetes/pkg/util/hash"
 )
-
-const (
-	// TODO: to be deleted after v1.3 is released
-	// Its value is the json representation of map[string(IP)][HostRecord]
-	// example: '{"10.245.1.6":{"HostName":"my-webserver"}}'
-	PodHostnamesAnnotation = "endpoints.beta.kubernetes.io/hostnames-map"
-)
-
-// TODO: to be deleted after v1.3 is released
-type HostRecord struct {
-	HostName string
-}
 
 // RepackSubsets takes a slice of EndpointSubset objects, expands it to the full
 // representation, and then repacks that into the canonical layout.  This

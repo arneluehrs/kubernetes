@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,8 +23,8 @@ import (
 	"testing"
 
 	dockercontainer "github.com/docker/engine-api/types/container"
-	"k8s.io/kubernetes/pkg/api"
 	apitesting "k8s.io/kubernetes/pkg/api/testing"
+	"k8s.io/kubernetes/pkg/api/v1"
 )
 
 func TestModifyContainerConfig(t *testing.T) {
@@ -33,13 +33,13 @@ func TestModifyContainerConfig(t *testing.T) {
 
 	cases := []struct {
 		name     string
-		podSc    *api.PodSecurityContext
-		sc       *api.SecurityContext
+		podSc    *v1.PodSecurityContext
+		sc       *v1.SecurityContext
 		expected *dockercontainer.Config
 	}{
 		{
 			name: "container.SecurityContext.RunAsUser set",
-			sc: &api.SecurityContext{
+			sc: &v1.SecurityContext{
 				RunAsUser: &uid,
 			},
 			expected: &dockercontainer.Config{
@@ -48,12 +48,12 @@ func TestModifyContainerConfig(t *testing.T) {
 		},
 		{
 			name:     "no RunAsUser value set",
-			sc:       &api.SecurityContext{},
+			sc:       &v1.SecurityContext{},
 			expected: &dockercontainer.Config{},
 		},
 		{
 			name: "pod.Spec.SecurityContext.RunAsUser set",
-			podSc: &api.PodSecurityContext{
+			podSc: &v1.PodSecurityContext{
 				RunAsUser: &uid,
 			},
 			expected: &dockercontainer.Config{
@@ -62,10 +62,10 @@ func TestModifyContainerConfig(t *testing.T) {
 		},
 		{
 			name: "container.SecurityContext.RunAsUser overrides pod.Spec.SecurityContext.RunAsUser",
-			podSc: &api.PodSecurityContext{
+			podSc: &v1.PodSecurityContext{
 				RunAsUser: &uid,
 			},
-			sc: &api.SecurityContext{
+			sc: &v1.SecurityContext{
 				RunAsUser: &overrideUid,
 			},
 			expected: &dockercontainer.Config{
@@ -75,9 +75,9 @@ func TestModifyContainerConfig(t *testing.T) {
 	}
 
 	provider := NewSimpleSecurityContextProvider()
-	dummyContainer := &api.Container{}
+	dummyContainer := &v1.Container{}
 	for _, tc := range cases {
-		pod := &api.Pod{Spec: api.PodSpec{SecurityContext: tc.podSc}}
+		pod := &v1.Pod{Spec: v1.PodSpec{SecurityContext: tc.podSc}}
 		dummyContainer.SecurityContext = tc.sc
 		dockerCfg := &dockercontainer.Config{}
 
@@ -91,7 +91,7 @@ func TestModifyContainerConfig(t *testing.T) {
 
 func TestModifyHostConfig(t *testing.T) {
 	priv := true
-	setPrivSC := &api.SecurityContext{}
+	setPrivSC := &v1.SecurityContext{}
 	setPrivSC.Privileged = &priv
 	setPrivHC := &dockercontainer.HostConfig{
 		Privileged: true,
@@ -104,10 +104,10 @@ func TestModifyHostConfig(t *testing.T) {
 
 	setSELinuxHC := &dockercontainer.HostConfig{}
 	setSELinuxHC.SecurityOpt = []string{
-		fmt.Sprintf("%s:%s", dockerLabelUser, "user"),
-		fmt.Sprintf("%s:%s", dockerLabelRole, "role"),
-		fmt.Sprintf("%s:%s", dockerLabelType, "type"),
-		fmt.Sprintf("%s:%s", dockerLabelLevel, "level"),
+		fmt.Sprintf("%s:%s", DockerLabelUser, "user"),
+		fmt.Sprintf("%s:%s", DockerLabelRole, "role"),
+		fmt.Sprintf("%s:%s", DockerLabelType, "type"),
+		fmt.Sprintf("%s:%s", DockerLabelLevel, "level"),
 	}
 
 	// seLinuxLabelsSC := fullValidSecurityContext()
@@ -115,8 +115,8 @@ func TestModifyHostConfig(t *testing.T) {
 
 	cases := []struct {
 		name     string
-		podSc    *api.PodSecurityContext
-		sc       *api.SecurityContext
+		podSc    *v1.PodSecurityContext
+		sc       *v1.SecurityContext
 		expected *dockercontainer.HostConfig
 	}{
 		{
@@ -131,21 +131,21 @@ func TestModifyHostConfig(t *testing.T) {
 		},
 		{
 			name: "container.SecurityContext.Capabilities",
-			sc: &api.SecurityContext{
+			sc: &v1.SecurityContext{
 				Capabilities: inputCapabilities(),
 			},
 			expected: setCapsHC,
 		},
 		{
 			name: "container.SecurityContext.SELinuxOptions",
-			sc: &api.SecurityContext{
+			sc: &v1.SecurityContext{
 				SELinuxOptions: inputSELinuxOptions(),
 			},
 			expected: setSELinuxHC,
 		},
 		{
 			name: "pod.Spec.SecurityContext.SELinuxOptions",
-			podSc: &api.PodSecurityContext{
+			podSc: &v1.PodSecurityContext{
 				SELinuxOptions: inputSELinuxOptions(),
 			},
 			expected: setSELinuxHC,
@@ -159,14 +159,14 @@ func TestModifyHostConfig(t *testing.T) {
 	}
 
 	provider := NewSimpleSecurityContextProvider()
-	dummyContainer := &api.Container{}
+	dummyContainer := &v1.Container{}
 
 	for _, tc := range cases {
-		pod := &api.Pod{Spec: api.PodSpec{SecurityContext: tc.podSc}}
+		pod := &v1.Pod{Spec: v1.PodSpec{SecurityContext: tc.podSc}}
 		dummyContainer.SecurityContext = tc.sc
 		dockerCfg := &dockercontainer.HostConfig{}
 
-		provider.ModifyHostConfig(pod, dummyContainer, dockerCfg)
+		provider.ModifyHostConfig(pod, dummyContainer, dockerCfg, nil)
 
 		if e, a := tc.expected, dockerCfg; !reflect.DeepEqual(e, a) {
 			t.Errorf("%v: unexpected modification of host config\nExpected:\n\n%#v\n\nGot:\n\n%#v", tc.name, e, a)
@@ -175,52 +175,70 @@ func TestModifyHostConfig(t *testing.T) {
 }
 
 func TestModifyHostConfigPodSecurityContext(t *testing.T) {
-	supplementalGroupsSC := &api.PodSecurityContext{}
+	supplementalGroupsSC := &v1.PodSecurityContext{}
 	supplementalGroupsSC.SupplementalGroups = []int64{2222}
 	supplementalGroupHC := fullValidHostConfig()
 	supplementalGroupHC.GroupAdd = []string{"2222"}
 	fsGroupHC := fullValidHostConfig()
 	fsGroupHC.GroupAdd = []string{"1234"}
+	extraSupplementalGroupHC := fullValidHostConfig()
+	extraSupplementalGroupHC.GroupAdd = []string{"1234"}
 	bothHC := fullValidHostConfig()
 	bothHC.GroupAdd = []string{"2222", "1234"}
 	fsGroup := int64(1234)
+	extraSupplementalGroup := []int64{1234}
 
 	testCases := map[string]struct {
-		securityContext *api.PodSecurityContext
-		expected        *dockercontainer.HostConfig
+		securityContext         *v1.PodSecurityContext
+		expected                *dockercontainer.HostConfig
+		extraSupplementalGroups []int64
 	}{
 		"nil": {
-			securityContext: nil,
-			expected:        fullValidHostConfig(),
+			securityContext:         nil,
+			expected:                fullValidHostConfig(),
+			extraSupplementalGroups: nil,
 		},
 		"SupplementalGroup": {
-			securityContext: supplementalGroupsSC,
-			expected:        supplementalGroupHC,
+			securityContext:         supplementalGroupsSC,
+			expected:                supplementalGroupHC,
+			extraSupplementalGroups: nil,
 		},
 		"FSGroup": {
-			securityContext: &api.PodSecurityContext{FSGroup: &fsGroup},
-			expected:        fsGroupHC,
+			securityContext:         &v1.PodSecurityContext{FSGroup: &fsGroup},
+			expected:                fsGroupHC,
+			extraSupplementalGroups: nil,
 		},
 		"FSGroup + SupplementalGroups": {
-			securityContext: &api.PodSecurityContext{
+			securityContext: &v1.PodSecurityContext{
 				SupplementalGroups: []int64{2222},
 				FSGroup:            &fsGroup,
 			},
-			expected: bothHC,
+			expected:                bothHC,
+			extraSupplementalGroups: nil,
+		},
+		"ExtraSupplementalGroup": {
+			securityContext:         nil,
+			expected:                extraSupplementalGroupHC,
+			extraSupplementalGroups: extraSupplementalGroup,
+		},
+		"ExtraSupplementalGroup + SupplementalGroups": {
+			securityContext:         supplementalGroupsSC,
+			expected:                bothHC,
+			extraSupplementalGroups: extraSupplementalGroup,
 		},
 	}
 
 	provider := NewSimpleSecurityContextProvider()
-	dummyContainer := &api.Container{}
+	dummyContainer := &v1.Container{}
 	dummyContainer.SecurityContext = fullValidSecurityContext()
-	dummyPod := &api.Pod{
-		Spec: apitesting.DeepEqualSafePodSpec(),
+	dummyPod := &v1.Pod{
+		Spec: apitesting.V1DeepEqualSafePodSpec(),
 	}
 
 	for k, v := range testCases {
 		dummyPod.Spec.SecurityContext = v.securityContext
 		dockerCfg := &dockercontainer.HostConfig{}
-		provider.ModifyHostConfig(dummyPod, dummyContainer, dockerCfg)
+		provider.ModifyHostConfig(dummyPod, dummyContainer, dockerCfg, v.extraSupplementalGroups)
 		if !reflect.DeepEqual(v.expected, dockerCfg) {
 			t.Errorf("unexpected modification of host config for %s.  Expected: %#v Got: %#v", k, v.expected, dockerCfg)
 		}
@@ -259,9 +277,9 @@ func TestModifySecurityOption(t *testing.T) {
 	}
 }
 
-func overridePodSecurityContext() *api.PodSecurityContext {
-	return &api.PodSecurityContext{
-		SELinuxOptions: &api.SELinuxOptions{
+func overridePodSecurityContext() *v1.PodSecurityContext {
+	return &v1.PodSecurityContext{
+		SELinuxOptions: &v1.SELinuxOptions{
 			User:  "user2",
 			Role:  "role2",
 			Type:  "type2",
@@ -270,30 +288,30 @@ func overridePodSecurityContext() *api.PodSecurityContext {
 	}
 }
 
-func fullValidPodSecurityContext() *api.PodSecurityContext {
-	return &api.PodSecurityContext{
+func fullValidPodSecurityContext() *v1.PodSecurityContext {
+	return &v1.PodSecurityContext{
 		SELinuxOptions: inputSELinuxOptions(),
 	}
 }
 
-func fullValidSecurityContext() *api.SecurityContext {
+func fullValidSecurityContext() *v1.SecurityContext {
 	priv := true
-	return &api.SecurityContext{
+	return &v1.SecurityContext{
 		Privileged:     &priv,
 		Capabilities:   inputCapabilities(),
 		SELinuxOptions: inputSELinuxOptions(),
 	}
 }
 
-func inputCapabilities() *api.Capabilities {
-	return &api.Capabilities{
-		Add:  []api.Capability{"addCapA", "addCapB"},
-		Drop: []api.Capability{"dropCapA", "dropCapB"},
+func inputCapabilities() *v1.Capabilities {
+	return &v1.Capabilities{
+		Add:  []v1.Capability{"addCapA", "addCapB"},
+		Drop: []v1.Capability{"dropCapA", "dropCapB"},
 	}
 }
 
-func inputSELinuxOptions() *api.SELinuxOptions {
-	return &api.SELinuxOptions{
+func inputSELinuxOptions() *v1.SELinuxOptions {
+	return &v1.SELinuxOptions{
 		User:  "user",
 		Role:  "role",
 		Type:  "type",
@@ -307,10 +325,10 @@ func fullValidHostConfig() *dockercontainer.HostConfig {
 		CapAdd:     []string{"addCapA", "addCapB"},
 		CapDrop:    []string{"dropCapA", "dropCapB"},
 		SecurityOpt: []string{
-			fmt.Sprintf("%s:%s", dockerLabelUser, "user"),
-			fmt.Sprintf("%s:%s", dockerLabelRole, "role"),
-			fmt.Sprintf("%s:%s", dockerLabelType, "type"),
-			fmt.Sprintf("%s:%s", dockerLabelLevel, "level"),
+			fmt.Sprintf("%s:%s", DockerLabelUser, "user"),
+			fmt.Sprintf("%s:%s", DockerLabelRole, "role"),
+			fmt.Sprintf("%s:%s", DockerLabelType, "type"),
+			fmt.Sprintf("%s:%s", DockerLabelLevel, "level"),
 		},
 	}
 }

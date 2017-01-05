@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,7 +20,8 @@ import (
 	"fmt"
 
 	"github.com/golang/glog"
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/v1"
+	metav1 "k8s.io/kubernetes/pkg/apis/meta/v1"
 	"k8s.io/kubernetes/pkg/types"
 	ioutil "k8s.io/kubernetes/pkg/util/io"
 	"k8s.io/kubernetes/pkg/util/mount"
@@ -50,15 +51,31 @@ func (plugin *configMapPlugin) Init(host volume.VolumeHost) error {
 	return nil
 }
 
-func (plugin *configMapPlugin) Name() string {
+func (plugin *configMapPlugin) GetPluginName() string {
 	return configMapPluginName
+}
+
+func (plugin *configMapPlugin) GetVolumeName(spec *volume.Spec) (string, error) {
+	volumeSource, _ := getVolumeSource(spec)
+	if volumeSource == nil {
+		return "", fmt.Errorf("Spec does not reference a ConfigMap volume type")
+	}
+
+	return fmt.Sprintf(
+		"%v/%v",
+		spec.Name(),
+		volumeSource.Name), nil
 }
 
 func (plugin *configMapPlugin) CanSupport(spec *volume.Spec) bool {
 	return spec.Volume != nil && spec.Volume.ConfigMap != nil
 }
 
-func (plugin *configMapPlugin) NewMounter(spec *volume.Spec, pod *api.Pod, opts volume.VolumeOptions) (volume.Mounter, error) {
+func (plugin *configMapPlugin) RequiresRemount() bool {
+	return true
+}
+
+func (plugin *configMapPlugin) NewMounter(spec *volume.Spec, pod *v1.Pod, opts volume.VolumeOptions) (volume.Mounter, error) {
 	return &configMapVolumeMounter{
 		configMapVolume: &configMapVolume{spec.Name(), pod.UID, plugin, plugin.host.GetMounter(), plugin.host.GetWriter(), volume.MetricsNil{}},
 		source:          *spec.Volume.ConfigMap,
@@ -68,6 +85,16 @@ func (plugin *configMapPlugin) NewMounter(spec *volume.Spec, pod *api.Pod, opts 
 
 func (plugin *configMapPlugin) NewUnmounter(volName string, podUID types.UID) (volume.Unmounter, error) {
 	return &configMapVolumeUnmounter{&configMapVolume{volName, podUID, plugin, plugin.host.GetMounter(), plugin.host.GetWriter(), volume.MetricsNil{}}}, nil
+}
+
+func (plugin *configMapPlugin) ConstructVolumeSpec(volumeName, mountPath string) (*volume.Spec, error) {
+	configMapVolume := &v1.Volume{
+		Name: volumeName,
+		VolumeSource: v1.VolumeSource{
+			ConfigMap: &v1.ConfigMapVolumeSource{},
+		},
+	}
+	return volume.NewSpecFromVolume(configMapVolume), nil
 }
 
 type configMapVolume struct {
@@ -90,8 +117,8 @@ func (sv *configMapVolume) GetPath() string {
 type configMapVolumeMounter struct {
 	*configMapVolume
 
-	source api.ConfigMapVolumeSource
-	pod    api.Pod
+	source v1.ConfigMapVolumeSource
+	pod    v1.Pod
 	opts   *volume.VolumeOptions
 }
 
@@ -105,9 +132,21 @@ func (sv *configMapVolume) GetAttributes() volume.Attributes {
 	}
 }
 
-// This is the spec for the volume that this plugin wraps.
-var wrappedVolumeSpec = volume.Spec{
-	Volume: &api.Volume{VolumeSource: api.VolumeSource{EmptyDir: &api.EmptyDirVolumeSource{Medium: api.StorageMediumMemory}}},
+func wrappedVolumeSpec() volume.Spec {
+	// This is the spec for the volume that this plugin wraps.
+	return volume.Spec{
+		// This should be on a tmpfs instead of the local disk; the problem is
+		// charging the memory for the tmpfs to the right cgroup.  We should make
+		// this a tmpfs when we can do the accounting correctly.
+		Volume: &v1.Volume{VolumeSource: v1.VolumeSource{EmptyDir: &v1.EmptyDirVolumeSource{}}},
+	}
+}
+
+// Checks prior to mount operations to verify that the required components (binaries, etc.)
+// to mount the volume are available on the underlying node.
+// If not, it returns an error
+func (b *configMapVolumeMounter) CanMount() error {
+	return nil
 }
 
 func (b *configMapVolumeMounter) SetUp(fsGroup *int64) error {
@@ -118,7 +157,7 @@ func (b *configMapVolumeMounter) SetUpAt(dir string, fsGroup *int64) error {
 	glog.V(3).Infof("Setting up volume %v for pod %v at %v", b.volName, b.pod.UID, dir)
 
 	// Wrap EmptyDir, let it do the setup.
-	wrapped, err := b.plugin.host.NewWrapperMounter(b.volName, wrappedVolumeSpec, &b.pod, *b.opts)
+	wrapped, err := b.plugin.host.NewWrapperMounter(b.volName, wrappedVolumeSpec(), &b.pod, *b.opts)
 	if err != nil {
 		return err
 	}
@@ -131,7 +170,7 @@ func (b *configMapVolumeMounter) SetUpAt(dir string, fsGroup *int64) error {
 		return fmt.Errorf("Cannot setup configMap volume %v because kube client is not configured", b.volName)
 	}
 
-	configMap, err := kubeClient.Core().ConfigMaps(b.pod.Namespace).Get(b.source.Name)
+	configMap, err := kubeClient.Core().ConfigMaps(b.pod.Namespace).Get(b.source.Name, metav1.GetOptions{})
 	if err != nil {
 		glog.Errorf("Couldn't get configMap %v/%v: %v", b.pod.Namespace, b.source.Name, err)
 		return err
@@ -144,7 +183,7 @@ func (b *configMapVolumeMounter) SetUpAt(dir string, fsGroup *int64) error {
 		len(configMap.Data),
 		totalBytes)
 
-	payload, err := makePayload(b.source.Items, configMap)
+	payload, err := makePayload(b.source.Items, configMap, b.source.DefaultMode)
 	if err != nil {
 		return err
 	}
@@ -171,29 +210,43 @@ func (b *configMapVolumeMounter) SetUpAt(dir string, fsGroup *int64) error {
 	return nil
 }
 
-func makePayload(mappings []api.KeyToPath, configMap *api.ConfigMap) (map[string][]byte, error) {
-	payload := make(map[string][]byte, len(configMap.Data))
+func makePayload(mappings []v1.KeyToPath, configMap *v1.ConfigMap, defaultMode *int32) (map[string]volumeutil.FileProjection, error) {
+	if defaultMode == nil {
+		return nil, fmt.Errorf("No defaultMode used, not even the default value for it")
+	}
+
+	payload := make(map[string]volumeutil.FileProjection, len(configMap.Data))
+	var fileProjection volumeutil.FileProjection
 
 	if len(mappings) == 0 {
 		for name, data := range configMap.Data {
-			payload[name] = []byte(data)
+			fileProjection.Data = []byte(data)
+			fileProjection.Mode = *defaultMode
+			payload[name] = fileProjection
 		}
 	} else {
 		for _, ktp := range mappings {
 			content, ok := configMap.Data[ktp.Key]
 			if !ok {
-				glog.Errorf("references non-existent config key")
-				return nil, fmt.Errorf("references non-existent config key")
+				err_msg := "references non-existent config key"
+				glog.Errorf(err_msg)
+				return nil, fmt.Errorf(err_msg)
 			}
 
-			payload[ktp.Path] = []byte(content)
+			fileProjection.Data = []byte(content)
+			if ktp.Mode != nil {
+				fileProjection.Mode = *ktp.Mode
+			} else {
+				fileProjection.Mode = *defaultMode
+			}
+			payload[ktp.Path] = fileProjection
 		}
 	}
 
 	return payload, nil
 }
 
-func totalBytes(configMap *api.ConfigMap) int {
+func totalBytes(configMap *v1.ConfigMap) int {
 	totalSize := 0
 	for _, value := range configMap.Data {
 		totalSize += len(value)
@@ -214,12 +267,17 @@ func (c *configMapVolumeUnmounter) TearDown() error {
 }
 
 func (c *configMapVolumeUnmounter) TearDownAt(dir string) error {
-	glog.V(3).Infof("Tearing down volume %v for pod %v at %v", c.volName, c.podUID, dir)
+	return volume.UnmountViaEmptyDir(dir, c.plugin.host, c.volName, wrappedVolumeSpec(), c.podUID)
+}
 
-	// Wrap EmptyDir, let it do the teardown.
-	wrapped, err := c.plugin.host.NewWrapperUnmounter(c.volName, wrappedVolumeSpec, c.podUID)
-	if err != nil {
-		return err
+func getVolumeSource(spec *volume.Spec) (*v1.ConfigMapVolumeSource, bool) {
+	var readOnly bool
+	var volumeSource *v1.ConfigMapVolumeSource
+
+	if spec.Volume != nil && spec.Volume.ConfigMap != nil {
+		volumeSource = spec.Volume.ConfigMap
+		readOnly = spec.ReadOnly
 	}
-	return wrapped.TearDownAt(dir)
+
+	return volumeSource, readOnly
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,7 +21,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/v1"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/util/wait"
 )
@@ -35,7 +35,7 @@ func TestCacheOperations(t *testing.T) {
 	_, found := m.Get(unsetID)
 	assert.False(t, found, "unset result found")
 
-	m.Set(setID, Success, &api.Pod{})
+	m.Set(setID, Success, &v1.Pod{})
 	result, found := m.Get(setID)
 	assert.True(t, result == Success, "set result")
 	assert.True(t, found, "set result found")
@@ -48,7 +48,7 @@ func TestCacheOperations(t *testing.T) {
 func TestUpdates(t *testing.T) {
 	m := NewManager()
 
-	pod := &api.Pod{ObjectMeta: api.ObjectMeta{Name: "test-pod"}}
+	pod := &v1.Pod{ObjectMeta: v1.ObjectMeta{Name: "test-pod"}}
 	fooID := kubecontainer.ContainerID{Type: "test", ID: "foo"}
 	barID := kubecontainer.ContainerID{Type: "test", ID: "bar"}
 
@@ -56,7 +56,7 @@ func TestUpdates(t *testing.T) {
 		select {
 		case u := <-m.Updates():
 			if expected != u {
-				t.Errorf("Expected update %v, recieved %v: %s", expected, u, msg)
+				t.Errorf("Expected update %v, received %v: %s", expected, u, msg)
 			}
 		case <-time.After(wait.ForeverTestTimeout):
 			t.Errorf("Timed out waiting for update %v: %s", expected, msg)

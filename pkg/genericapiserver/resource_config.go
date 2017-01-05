@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright 2016 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,16 +17,17 @@ limitations under the License.
 package genericapiserver
 
 import (
-	"k8s.io/kubernetes/pkg/api/unversioned"
+	"k8s.io/kubernetes/pkg/runtime/schema"
 	"k8s.io/kubernetes/pkg/util/sets"
 )
 
 // APIResourceConfigSource is the interface to determine which versions and resources are enabled
 type APIResourceConfigSource interface {
-	AnyVersionOfResourceEnabled(resource unversioned.GroupResource) bool
-	ResourceEnabled(resource unversioned.GroupVersionResource) bool
-	AllResourcesForVersionEnabled(version unversioned.GroupVersion) bool
-	AnyResourcesForVersionEnabled(version unversioned.GroupVersion) bool
+	AnyVersionOfResourceEnabled(resource schema.GroupResource) bool
+	ResourceEnabled(resource schema.GroupVersionResource) bool
+	AllResourcesForVersionEnabled(version schema.GroupVersion) bool
+	AnyResourcesForVersionEnabled(version schema.GroupVersion) bool
+	AnyResourcesForGroupEnabled(group string) bool
 }
 
 // Specifies the overrides for various API group versions.
@@ -50,11 +51,11 @@ type GroupVersionResourceConfig struct {
 var _ APIResourceConfigSource = &ResourceConfig{}
 
 type ResourceConfig struct {
-	GroupVersionResourceConfigs map[unversioned.GroupVersion]*GroupVersionResourceConfig
+	GroupVersionResourceConfigs map[schema.GroupVersion]*GroupVersionResourceConfig
 }
 
 func NewResourceConfig() *ResourceConfig {
-	return &ResourceConfig{GroupVersionResourceConfigs: map[unversioned.GroupVersion]*GroupVersionResourceConfig{}}
+	return &ResourceConfig{GroupVersionResourceConfigs: map[schema.GroupVersion]*GroupVersionResourceConfig{}}
 }
 
 func NewGroupVersionResourceConfig() *GroupVersionResourceConfig {
@@ -62,7 +63,7 @@ func NewGroupVersionResourceConfig() *GroupVersionResourceConfig {
 }
 
 // DisableVersions disables the versions entirely.  No resources (even those whitelisted in EnabledResources) will be enabled
-func (o *ResourceConfig) DisableVersions(versions ...unversioned.GroupVersion) {
+func (o *ResourceConfig) DisableVersions(versions ...schema.GroupVersion) {
 	for _, version := range versions {
 		_, versionExists := o.GroupVersionResourceConfigs[version]
 		if !versionExists {
@@ -73,7 +74,7 @@ func (o *ResourceConfig) DisableVersions(versions ...unversioned.GroupVersion) {
 	}
 }
 
-func (o *ResourceConfig) EnableVersions(versions ...unversioned.GroupVersion) {
+func (o *ResourceConfig) EnableVersions(versions ...schema.GroupVersion) {
 	for _, version := range versions {
 		_, versionExists := o.GroupVersionResourceConfigs[version]
 		if !versionExists {
@@ -84,7 +85,7 @@ func (o *ResourceConfig) EnableVersions(versions ...unversioned.GroupVersion) {
 	}
 }
 
-func (o *ResourceConfig) DisableResources(resources ...unversioned.GroupVersionResource) {
+func (o *ResourceConfig) DisableResources(resources ...schema.GroupVersionResource) {
 	for _, resource := range resources {
 		version := resource.GroupVersion()
 		_, versionExists := o.GroupVersionResourceConfigs[version]
@@ -96,7 +97,7 @@ func (o *ResourceConfig) DisableResources(resources ...unversioned.GroupVersionR
 	}
 }
 
-func (o *ResourceConfig) EnableResources(resources ...unversioned.GroupVersionResource) {
+func (o *ResourceConfig) EnableResources(resources ...schema.GroupVersionResource) {
 	for _, resource := range resources {
 		version := resource.GroupVersion()
 		_, versionExists := o.GroupVersionResourceConfigs[version]
@@ -112,7 +113,7 @@ func (o *ResourceConfig) EnableResources(resources ...unversioned.GroupVersionRe
 // AnyResourcesForVersionEnabled only considers matches based on exactly group/resource lexical matching.  This means that
 // resource renames across versions are NOT considered to be the same resource by this method. You'll need to manually check
 // using the ResourceEnabled function.
-func (o *ResourceConfig) AnyVersionOfResourceEnabled(resource unversioned.GroupResource) bool {
+func (o *ResourceConfig) AnyVersionOfResourceEnabled(resource schema.GroupResource) bool {
 	for version := range o.GroupVersionResourceConfigs {
 		if version.Group != resource.Group {
 			continue
@@ -126,7 +127,7 @@ func (o *ResourceConfig) AnyVersionOfResourceEnabled(resource unversioned.GroupR
 	return false
 }
 
-func (o *ResourceConfig) ResourceEnabled(resource unversioned.GroupVersionResource) bool {
+func (o *ResourceConfig) ResourceEnabled(resource schema.GroupVersionResource) bool {
 	versionOverride, versionExists := o.GroupVersionResourceConfigs[resource.GroupVersion()]
 	if !versionExists {
 		return false
@@ -146,7 +147,7 @@ func (o *ResourceConfig) ResourceEnabled(resource unversioned.GroupVersionResour
 	return true
 }
 
-func (o *ResourceConfig) AllResourcesForVersionEnabled(version unversioned.GroupVersion) bool {
+func (o *ResourceConfig) AllResourcesForVersionEnabled(version schema.GroupVersion) bool {
 	versionOverride, versionExists := o.GroupVersionResourceConfigs[version]
 	if !versionExists {
 		return false
@@ -162,11 +163,23 @@ func (o *ResourceConfig) AllResourcesForVersionEnabled(version unversioned.Group
 	return false
 }
 
-func (o *ResourceConfig) AnyResourcesForVersionEnabled(version unversioned.GroupVersion) bool {
+func (o *ResourceConfig) AnyResourcesForVersionEnabled(version schema.GroupVersion) bool {
 	versionOverride, versionExists := o.GroupVersionResourceConfigs[version]
 	if !versionExists {
 		return false
 	}
 
 	return versionOverride.Enable
+}
+
+func (o *ResourceConfig) AnyResourcesForGroupEnabled(group string) bool {
+	for version := range o.GroupVersionResourceConfigs {
+		if version.Group == group {
+			if o.AnyResourcesForVersionEnabled(version) {
+				return true
+			}
+		}
+	}
+
+	return false
 }

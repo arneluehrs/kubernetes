@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copyright 2014 The Kubernetes Authors All rights reserved.
+# Copyright 2014 The Kubernetes Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -57,7 +57,12 @@ BASH_TARGETS="
 	generated-docs
 	generated-swagger-docs
 	swagger-spec
-	api-reference-docs"
+	openapi-spec
+	api-reference-docs
+	bazel
+	federation-openapi-spec"
+# TODO: (caesarxuchao) uncomment after 1.5 code freeze.
+#	staging-client-go"
 
 
 for t in $BASH_TARGETS
@@ -72,7 +77,7 @@ do
 		fi
 	else
 		if ! bash "$KUBE_ROOT/hack/update-$t.sh"; then
-			echo -e "${color_red}$Updating $t FAILED${color_norm}"
+			echo -e "${color_red}Updating $t FAILED${color_norm}"
 			if ! $ALL; then
 				exit 1
 			fi

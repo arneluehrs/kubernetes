@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright 2016 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,7 +21,6 @@ import (
 
 	"k8s.io/kubernetes/federation/apis/federation"
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/unversioned"
 )
 
 func TestValidateCluster(t *testing.T) {
@@ -29,7 +28,7 @@ func TestValidateCluster(t *testing.T) {
 		{
 			ObjectMeta: api.ObjectMeta{Name: "cluster-s"},
 			Spec: federation.ClusterSpec{
-				ServerAddressByClientCIDRs: []unversioned.ServerAddressByClientCIDR{
+				ServerAddressByClientCIDRs: []federation.ServerAddressByClientCIDR{
 					{
 						ClientCIDR:    "0.0.0.0/0",
 						ServerAddress: "localhost:8888",
@@ -52,7 +51,7 @@ func TestValidateCluster(t *testing.T) {
 		"empty cluster addresses": {
 			ObjectMeta: api.ObjectMeta{Name: "cluster-f"},
 			Spec: federation.ClusterSpec{
-				ServerAddressByClientCIDRs: []unversioned.ServerAddressByClientCIDR{},
+				ServerAddressByClientCIDRs: []federation.ServerAddressByClientCIDR{},
 			}},
 		"invalid_label": {
 			ObjectMeta: api.ObjectMeta{
@@ -62,11 +61,22 @@ func TestValidateCluster(t *testing.T) {
 				},
 			},
 		},
+		"invalid cluster name (is a subdomain)": {
+			ObjectMeta: api.ObjectMeta{Name: "mycluster.mycompany"},
+			Spec: federation.ClusterSpec{
+				ServerAddressByClientCIDRs: []federation.ServerAddressByClientCIDR{
+					{
+						ClientCIDR:    "0.0.0.0/0",
+						ServerAddress: "localhost:8888",
+					},
+				},
+			},
+		},
 	}
 	for testName, errorCase := range errorCases {
 		errs := ValidateCluster(&errorCase)
 		if len(errs) == 0 {
-			t.Errorf("expected failur for %s", testName)
+			t.Errorf("expected failure for %s", testName)
 		}
 	}
 }
@@ -81,7 +91,7 @@ func TestValidateClusterUpdate(t *testing.T) {
 			old: federation.Cluster{
 				ObjectMeta: api.ObjectMeta{Name: "cluster-s"},
 				Spec: federation.ClusterSpec{
-					ServerAddressByClientCIDRs: []unversioned.ServerAddressByClientCIDR{
+					ServerAddressByClientCIDRs: []federation.ServerAddressByClientCIDR{
 						{
 							ClientCIDR:    "0.0.0.0/0",
 							ServerAddress: "localhost:8888",
@@ -92,7 +102,7 @@ func TestValidateClusterUpdate(t *testing.T) {
 			update: federation.Cluster{
 				ObjectMeta: api.ObjectMeta{Name: "cluster-s"},
 				Spec: federation.ClusterSpec{
-					ServerAddressByClientCIDRs: []unversioned.ServerAddressByClientCIDR{
+					ServerAddressByClientCIDRs: []federation.ServerAddressByClientCIDR{
 						{
 							ClientCIDR:    "0.0.0.0/0",
 							ServerAddress: "localhost:8888",
@@ -116,7 +126,7 @@ func TestValidateClusterUpdate(t *testing.T) {
 			old: federation.Cluster{
 				ObjectMeta: api.ObjectMeta{Name: "cluster-s"},
 				Spec: federation.ClusterSpec{
-					ServerAddressByClientCIDRs: []unversioned.ServerAddressByClientCIDR{
+					ServerAddressByClientCIDRs: []federation.ServerAddressByClientCIDR{
 						{
 							ClientCIDR:    "0.0.0.0/0",
 							ServerAddress: "localhost:8888",
@@ -127,7 +137,7 @@ func TestValidateClusterUpdate(t *testing.T) {
 			update: federation.Cluster{
 				ObjectMeta: api.ObjectMeta{Name: "cluster-newname"},
 				Spec: federation.ClusterSpec{
-					ServerAddressByClientCIDRs: []unversioned.ServerAddressByClientCIDR{
+					ServerAddressByClientCIDRs: []federation.ServerAddressByClientCIDR{
 						{
 							ClientCIDR:    "0.0.0.0/0",
 							ServerAddress: "localhost:8888",
@@ -155,7 +165,7 @@ func TestValidateClusterStatusUpdate(t *testing.T) {
 			old: federation.Cluster{
 				ObjectMeta: api.ObjectMeta{Name: "cluster-s"},
 				Spec: federation.ClusterSpec{
-					ServerAddressByClientCIDRs: []unversioned.ServerAddressByClientCIDR{
+					ServerAddressByClientCIDRs: []federation.ServerAddressByClientCIDR{
 						{
 							ClientCIDR:    "0.0.0.0/0",
 							ServerAddress: "localhost:8888",
@@ -171,7 +181,7 @@ func TestValidateClusterStatusUpdate(t *testing.T) {
 			update: federation.Cluster{
 				ObjectMeta: api.ObjectMeta{Name: "cluster-s"},
 				Spec: federation.ClusterSpec{
-					ServerAddressByClientCIDRs: []unversioned.ServerAddressByClientCIDR{
+					ServerAddressByClientCIDRs: []federation.ServerAddressByClientCIDR{
 						{
 							ClientCIDR:    "0.0.0.0/0",
 							ServerAddress: "localhost:8888",

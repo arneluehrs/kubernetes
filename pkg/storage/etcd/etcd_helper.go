@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"path"
 	"reflect"
-	"strings"
 	"time"
 
 	"k8s.io/kubernetes/pkg/api"
@@ -85,28 +84,6 @@ func init() {
 	metrics.Register()
 }
 
-// Codec provides access to the underlying codec being used by the implementation.
-func (h *etcdHelper) Codec() runtime.Codec {
-	return h.codec
-}
-
-// Implements storage.Interface.
-func (h *etcdHelper) Backends(ctx context.Context) []string {
-	if ctx == nil {
-		glog.Errorf("Context is nil")
-	}
-	members, err := h.etcdMembersAPI.List(ctx)
-	if err != nil {
-		glog.Errorf("Error obtaining etcd members list: %q", err)
-		return nil
-	}
-	mlist := []string{}
-	for _, member := range members {
-		mlist = append(mlist, member.ClientURLs...)
-	}
-	return mlist
-}
-
 // Implements storage.Interface.
 func (h *etcdHelper) Versioner() storage.Versioner {
 	return h.versioner
@@ -119,7 +96,7 @@ func (h *etcdHelper) Create(ctx context.Context, key string, obj, out runtime.Ob
 	if ctx == nil {
 		glog.Errorf("Context is nil")
 	}
-	key = h.prefixEtcdKey(key)
+	key = path.Join(h.pathPrefix, key)
 	data, err := runtime.Encode(h.codec, obj)
 	trace.Step("Object encoded")
 	if err != nil {
@@ -136,8 +113,8 @@ func (h *etcdHelper) Create(ctx context.Context, key string, obj, out runtime.Ob
 		PrevExist: etcd.PrevNoExist,
 	}
 	response, err := h.etcdKeysAPI.Set(ctx, key, string(data), &opts)
-	metrics.RecordEtcdRequestLatency("create", getTypeName(obj), startTime)
 	trace.Step("Object created")
+	metrics.RecordEtcdRequestLatency("create", getTypeName(obj), startTime)
 	if err != nil {
 		return toStorageErr(err, key, 0)
 	}
@@ -150,7 +127,7 @@ func (h *etcdHelper) Create(ctx context.Context, key string, obj, out runtime.Ob
 	return err
 }
 
-func checkPreconditions(preconditions *storage.Preconditions, out runtime.Object) error {
+func checkPreconditions(key string, preconditions *storage.Preconditions, out runtime.Object) error {
 	if preconditions == nil {
 		return nil
 	}
@@ -159,7 +136,8 @@ func checkPreconditions(preconditions *storage.Preconditions, out runtime.Object
 		return storage.NewInternalErrorf("can't enforce preconditions %v on un-introspectable object %v, got error: %v", *preconditions, out, err)
 	}
 	if preconditions.UID != nil && *preconditions.UID != objMeta.UID {
-		return etcd.Error{Code: etcd.ErrorCodeTestFailed, Message: fmt.Sprintf("the UID in the precondition (%s) does not match the UID in record (%s). The object might have been deleted and then recreated", *preconditions.UID, objMeta.UID)}
+		errMsg := fmt.Sprintf("Precondition failed: UID in precondition: %v, UID in object meta: %v", preconditions.UID, objMeta.UID)
+		return storage.NewInvalidObjError(key, errMsg)
 	}
 	return nil
 }
@@ -169,7 +147,7 @@ func (h *etcdHelper) Delete(ctx context.Context, key string, out runtime.Object,
 	if ctx == nil {
 		glog.Errorf("Context is nil")
 	}
-	key = h.prefixEtcdKey(key)
+	key = path.Join(h.pathPrefix, key)
 	v, err := conversion.EnforcePtr(out)
 	if err != nil {
 		panic("unable to convert output object to pointer")
@@ -195,7 +173,7 @@ func (h *etcdHelper) Delete(ctx context.Context, key string, out runtime.Object,
 		if err != nil {
 			return toStorageErr(err, key, 0)
 		}
-		if err := checkPreconditions(preconditions, obj); err != nil {
+		if err := checkPreconditions(key, preconditions, obj); err != nil {
 			return toStorageErr(err, key, 0)
 		}
 		index := uint64(0)
@@ -223,7 +201,7 @@ func (h *etcdHelper) Delete(ctx context.Context, key string, out runtime.Object,
 }
 
 // Implements storage.Interface.
-func (h *etcdHelper) Watch(ctx context.Context, key string, resourceVersion string, filter storage.FilterFunc) (watch.Interface, error) {
+func (h *etcdHelper) Watch(ctx context.Context, key string, resourceVersion string, pred storage.SelectionPredicate) (watch.Interface, error) {
 	if ctx == nil {
 		glog.Errorf("Context is nil")
 	}
@@ -231,14 +209,14 @@ func (h *etcdHelper) Watch(ctx context.Context, key string, resourceVersion stri
 	if err != nil {
 		return nil, err
 	}
-	key = h.prefixEtcdKey(key)
-	w := newEtcdWatcher(false, h.quorum, nil, filter, h.codec, h.versioner, nil, h)
+	key = path.Join(h.pathPrefix, key)
+	w := newEtcdWatcher(false, h.quorum, nil, storage.SimpleFilter(pred), h.codec, h.versioner, nil, h)
 	go w.etcdWatch(ctx, h.etcdKeysAPI, key, watchRV)
 	return w, nil
 }
 
 // Implements storage.Interface.
-func (h *etcdHelper) WatchList(ctx context.Context, key string, resourceVersion string, filter storage.FilterFunc) (watch.Interface, error) {
+func (h *etcdHelper) WatchList(ctx context.Context, key string, resourceVersion string, pred storage.SelectionPredicate) (watch.Interface, error) {
 	if ctx == nil {
 		glog.Errorf("Context is nil")
 	}
@@ -246,18 +224,18 @@ func (h *etcdHelper) WatchList(ctx context.Context, key string, resourceVersion 
 	if err != nil {
 		return nil, err
 	}
-	key = h.prefixEtcdKey(key)
-	w := newEtcdWatcher(true, h.quorum, exceptKey(key), filter, h.codec, h.versioner, nil, h)
+	key = path.Join(h.pathPrefix, key)
+	w := newEtcdWatcher(true, h.quorum, exceptKey(key), storage.SimpleFilter(pred), h.codec, h.versioner, nil, h)
 	go w.etcdWatch(ctx, h.etcdKeysAPI, key, watchRV)
 	return w, nil
 }
 
 // Implements storage.Interface.
-func (h *etcdHelper) Get(ctx context.Context, key string, objPtr runtime.Object, ignoreNotFound bool) error {
+func (h *etcdHelper) Get(ctx context.Context, key string, resourceVersion string, objPtr runtime.Object, ignoreNotFound bool) error {
 	if ctx == nil {
 		glog.Errorf("Context is nil")
 	}
-	key = h.prefixEtcdKey(key)
+	key = path.Join(h.pathPrefix, key)
 	_, _, _, err := h.bodyAndExtractObj(ctx, key, objPtr, ignoreNotFound)
 	return err
 }
@@ -318,7 +296,7 @@ func (h *etcdHelper) extractObj(response *etcd.Response, inErr error, objPtr run
 }
 
 // Implements storage.Interface.
-func (h *etcdHelper) GetToList(ctx context.Context, key string, filter storage.FilterFunc, listObj runtime.Object) error {
+func (h *etcdHelper) GetToList(ctx context.Context, key string, resourceVersion string, pred storage.SelectionPredicate, listObj runtime.Object) error {
 	if ctx == nil {
 		glog.Errorf("Context is nil")
 	}
@@ -327,7 +305,7 @@ func (h *etcdHelper) GetToList(ctx context.Context, key string, filter storage.F
 	if err != nil {
 		return err
 	}
-	key = h.prefixEtcdKey(key)
+	key = path.Join(h.pathPrefix, key)
 	startTime := time.Now()
 	trace.Step("About to read etcd node")
 
@@ -335,9 +313,8 @@ func (h *etcdHelper) GetToList(ctx context.Context, key string, filter storage.F
 		Quorum: h.quorum,
 	}
 	response, err := h.etcdKeysAPI.Get(ctx, key, opts)
-
-	metrics.RecordEtcdRequestLatency("get", getTypeName(listPtr), startTime)
 	trace.Step("Etcd node read")
+	metrics.RecordEtcdRequestLatency("get", getTypeName(listPtr), startTime)
 	if err != nil {
 		if etcdutil.IsEtcdNotFound(err) {
 			return nil
@@ -348,7 +325,7 @@ func (h *etcdHelper) GetToList(ctx context.Context, key string, filter storage.F
 	nodes := make([]*etcd.Node, 0)
 	nodes = append(nodes, response.Node)
 
-	if err := h.decodeNodeList(nodes, filter, listPtr); err != nil {
+	if err := h.decodeNodeList(nodes, storage.SimpleFilter(pred), listPtr); err != nil {
 		return err
 	}
 	trace.Step("Object decoded")
@@ -361,7 +338,7 @@ func (h *etcdHelper) GetToList(ctx context.Context, key string, filter storage.F
 // decodeNodeList walks the tree of each node in the list and decodes into the specified object
 func (h *etcdHelper) decodeNodeList(nodes []*etcd.Node, filter storage.FilterFunc, slicePtr interface{}) error {
 	trace := util.NewTrace("decodeNodeList " + getTypeName(slicePtr))
-	defer trace.LogIfLong(500 * time.Millisecond)
+	defer trace.LogIfLong(400 * time.Millisecond)
 	v, err := conversion.EnforcePtr(slicePtr)
 	if err != nil || v.Kind() != reflect.Slice {
 		// This should not happen at runtime.
@@ -401,26 +378,26 @@ func (h *etcdHelper) decodeNodeList(nodes []*etcd.Node, filter storage.FilterFun
 }
 
 // Implements storage.Interface.
-func (h *etcdHelper) List(ctx context.Context, key string, resourceVersion string, filter storage.FilterFunc, listObj runtime.Object) error {
+func (h *etcdHelper) List(ctx context.Context, key string, resourceVersion string, pred storage.SelectionPredicate, listObj runtime.Object) error {
 	if ctx == nil {
 		glog.Errorf("Context is nil")
 	}
 	trace := util.NewTrace("List " + getTypeName(listObj))
-	defer trace.LogIfLong(time.Second)
+	defer trace.LogIfLong(400 * time.Millisecond)
 	listPtr, err := meta.GetItemsPtr(listObj)
 	if err != nil {
 		return err
 	}
-	key = h.prefixEtcdKey(key)
+	key = path.Join(h.pathPrefix, key)
 	startTime := time.Now()
 	trace.Step("About to list etcd node")
 	nodes, index, err := h.listEtcdNode(ctx, key)
-	metrics.RecordEtcdRequestLatency("list", getTypeName(listPtr), startTime)
 	trace.Step("Etcd node listed")
+	metrics.RecordEtcdRequestLatency("list", getTypeName(listPtr), startTime)
 	if err != nil {
 		return err
 	}
-	if err := h.decodeNodeList(nodes, filter, listPtr); err != nil {
+	if err := h.decodeNodeList(nodes, storage.SimpleFilter(pred), listPtr); err != nil {
 		return err
 	}
 	trace.Step("Node list decoded")
@@ -456,7 +433,10 @@ func (h *etcdHelper) listEtcdNode(ctx context.Context, key string) ([]*etcd.Node
 }
 
 // Implements storage.Interface.
-func (h *etcdHelper) GuaranteedUpdate(ctx context.Context, key string, ptrToType runtime.Object, ignoreNotFound bool, preconditions *storage.Preconditions, tryUpdate storage.UpdateFunc) error {
+func (h *etcdHelper) GuaranteedUpdate(
+	ctx context.Context, key string, ptrToType runtime.Object, ignoreNotFound bool,
+	preconditions *storage.Preconditions, tryUpdate storage.UpdateFunc, _ ...runtime.Object) error {
+	// Ignore the suggestion about current object.
 	if ctx == nil {
 		glog.Errorf("Context is nil")
 	}
@@ -465,14 +445,14 @@ func (h *etcdHelper) GuaranteedUpdate(ctx context.Context, key string, ptrToType
 		// Panic is appropriate, because this is a programming error.
 		panic("need ptr to type")
 	}
-	key = h.prefixEtcdKey(key)
+	key = path.Join(h.pathPrefix, key)
 	for {
 		obj := reflect.New(v.Type()).Interface().(runtime.Object)
 		origBody, node, res, err := h.bodyAndExtractObj(ctx, key, obj, ignoreNotFound)
 		if err != nil {
 			return toStorageErr(err, key, 0)
 		}
-		if err := checkPreconditions(preconditions, obj); err != nil {
+		if err := checkPreconditions(key, preconditions, obj); err != nil {
 			return toStorageErr(err, key, 0)
 		}
 		meta := storage.ResponseMeta{}
@@ -544,7 +524,6 @@ func (h *etcdHelper) GuaranteedUpdate(ctx context.Context, key string, ptrToType
 		startTime := time.Now()
 		// Swap origBody with data, if origBody is the latest etcd data.
 		opts := etcd.SetOptions{
-			PrevValue: origBody,
 			PrevIndex: index,
 			TTL:       time.Duration(ttl) * time.Second,
 		}
@@ -557,13 +536,6 @@ func (h *etcdHelper) GuaranteedUpdate(ctx context.Context, key string, ptrToType
 		_, _, err = h.extractObj(response, err, ptrToType, false, false)
 		return toStorageErr(err, key, int64(index))
 	}
-}
-
-func (h *etcdHelper) prefixEtcdKey(key string) string {
-	if strings.HasPrefix(key, h.pathPrefix) {
-		return key
-	}
-	return path.Join(h.pathPrefix, key)
 }
 
 // etcdCache defines interface used for caching objects stored in etcd. Objects are keyed by

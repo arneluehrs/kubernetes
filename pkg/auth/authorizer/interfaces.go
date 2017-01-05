@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,22 +19,16 @@ package authorizer
 import (
 	"net/http"
 
-	"k8s.io/kubernetes/pkg/auth/user"
+	"k8s.io/apiserver/pkg/authentication/user"
 )
 
 // Attributes is an interface used by an Authorizer to get information about a request
 // that is used to make an authorization decision.
 type Attributes interface {
-	// The user string which the request was authenticated as, or empty if
-	// no authentication occurred and the request was allowed to proceed.
-	GetUserName() string
+	// GetUser returns the user.Info object to authorize
+	GetUser() user.Info
 
-	// The list of group names the authenticated user is a member of. Can be
-	// empty if the authenticated user is not in any groups, or if no
-	// authentication occurred.
-	GetGroups() []string
-
-	// GetVerb returns the kube verb associated with API requests (this includes get, list, watch, create, update, patch, delete, and proxy),
+	// GetVerb returns the kube verb associated with API requests (this includes get, list, watch, create, update, patch, delete, deletecollection, and proxy),
 	// or the lowercased HTTP verb associated with non-API requests (this includes get, put, post, patch, and delete)
 	GetVerb() string
 
@@ -73,12 +67,12 @@ type Attributes interface {
 // zero or more calls to methods of the Attributes interface.  It returns nil when an action is
 // authorized, otherwise it returns an error.
 type Authorizer interface {
-	Authorize(a Attributes) (err error)
+	Authorize(a Attributes) (authorized bool, reason string, err error)
 }
 
-type AuthorizerFunc func(a Attributes) error
+type AuthorizerFunc func(a Attributes) (bool, string, error)
 
-func (f AuthorizerFunc) Authorize(a Attributes) error {
+func (f AuthorizerFunc) Authorize(a Attributes) (bool, string, error) {
 	return f(a)
 }
 
@@ -101,12 +95,8 @@ type AttributesRecord struct {
 	Path            string
 }
 
-func (a AttributesRecord) GetUserName() string {
-	return a.User.GetName()
-}
-
-func (a AttributesRecord) GetGroups() []string {
-	return a.User.GetGroups()
+func (a AttributesRecord) GetUser() user.Info {
+	return a.User
 }
 
 func (a AttributesRecord) GetVerb() string {

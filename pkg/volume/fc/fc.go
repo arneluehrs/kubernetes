@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,7 +21,7 @@ import (
 	"strconv"
 
 	"github.com/golang/glog"
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/v1"
 	"k8s.io/kubernetes/pkg/types"
 	"k8s.io/kubernetes/pkg/util/exec"
 	"k8s.io/kubernetes/pkg/util/mount"
@@ -51,8 +51,18 @@ func (plugin *fcPlugin) Init(host volume.VolumeHost) error {
 	return nil
 }
 
-func (plugin *fcPlugin) Name() string {
+func (plugin *fcPlugin) GetPluginName() string {
 	return fcPluginName
+}
+
+func (plugin *fcPlugin) GetVolumeName(spec *volume.Spec) (string, error) {
+	volumeSource, _, err := getVolumeSource(spec)
+	if err != nil {
+		return "", err
+	}
+
+	//  TargetWWNs are the FibreChannel target worldwide names
+	return fmt.Sprintf("%v", volumeSource.TargetWWNs), nil
 }
 
 func (plugin *fcPlugin) CanSupport(spec *volume.Spec) bool {
@@ -63,14 +73,18 @@ func (plugin *fcPlugin) CanSupport(spec *volume.Spec) bool {
 	return true
 }
 
-func (plugin *fcPlugin) GetAccessModes() []api.PersistentVolumeAccessMode {
-	return []api.PersistentVolumeAccessMode{
-		api.ReadWriteOnce,
-		api.ReadOnlyMany,
+func (plugin *fcPlugin) RequiresRemount() bool {
+	return false
+}
+
+func (plugin *fcPlugin) GetAccessModes() []v1.PersistentVolumeAccessMode {
+	return []v1.PersistentVolumeAccessMode{
+		v1.ReadWriteOnce,
+		v1.ReadOnlyMany,
 	}
 }
 
-func (plugin *fcPlugin) NewMounter(spec *volume.Spec, pod *api.Pod, _ volume.VolumeOptions) (volume.Mounter, error) {
+func (plugin *fcPlugin) NewMounter(spec *volume.Spec, pod *v1.Pod, _ volume.VolumeOptions) (volume.Mounter, error) {
 	// Inject real implementations here, test through the internal function.
 	return plugin.newMounterInternal(spec, pod.UID, &FCUtil{}, plugin.host.GetMounter())
 }
@@ -78,14 +92,9 @@ func (plugin *fcPlugin) NewMounter(spec *volume.Spec, pod *api.Pod, _ volume.Vol
 func (plugin *fcPlugin) newMounterInternal(spec *volume.Spec, podUID types.UID, manager diskManager, mounter mount.Interface) (volume.Mounter, error) {
 	// fc volumes used directly in a pod have a ReadOnly flag set by the pod author.
 	// fc volumes used as a PersistentVolume gets the ReadOnly flag indirectly through the persistent-claim volume used to mount the PV
-	var readOnly bool
-	var fc *api.FCVolumeSource
-	if spec.Volume != nil && spec.Volume.FC != nil {
-		fc = spec.Volume.FC
-		readOnly = fc.ReadOnly
-	} else {
-		fc = spec.PersistentVolume.Spec.FC
-		readOnly = spec.ReadOnly
+	fc, readOnly, err := getVolumeSource(spec)
+	if err != nil {
+		return nil, err
 	}
 
 	if fc.Lun == nil {
@@ -132,6 +141,16 @@ func (plugin *fcPlugin) execCommand(command string, args []string) ([]byte, erro
 	return cmd.CombinedOutput()
 }
 
+func (plugin *fcPlugin) ConstructVolumeSpec(volumeName, mountPath string) (*volume.Spec, error) {
+	fcVolume := &v1.Volume{
+		Name: volumeName,
+		VolumeSource: v1.VolumeSource{
+			FC: &v1.FCVolumeSource{},
+		},
+	}
+	return volume.NewSpecFromVolume(fcVolume), nil
+}
+
 type fcDisk struct {
 	volName string
 	podUID  types.UID
@@ -168,6 +187,14 @@ func (b *fcDiskMounter) GetAttributes() volume.Attributes {
 		SupportsSELinux: true,
 	}
 }
+
+// Checks prior to mount operations to verify that the required components (binaries, etc.)
+// to mount the volume are available on the underlying node.
+// If not, it returns an error
+func (b *fcDiskMounter) CanMount() error {
+	return nil
+}
+
 func (b *fcDiskMounter) SetUp(fsGroup *int64) error {
 	return b.SetUpAt(b.GetPath(), fsGroup)
 }
@@ -196,4 +223,15 @@ func (c *fcDiskUnmounter) TearDown() error {
 
 func (c *fcDiskUnmounter) TearDownAt(dir string) error {
 	return diskTearDown(c.manager, *c, dir, c.mounter)
+}
+
+func getVolumeSource(spec *volume.Spec) (*v1.FCVolumeSource, bool, error) {
+	if spec.Volume != nil && spec.Volume.FC != nil {
+		return spec.Volume.FC, spec.Volume.FC.ReadOnly, nil
+	} else if spec.PersistentVolume != nil &&
+		spec.PersistentVolume.Spec.FC != nil {
+		return spec.PersistentVolume.Spec.FC, spec.ReadOnly, nil
+	}
+
+	return nil, false, fmt.Errorf("Spec does not reference a FibreChannel volume type")
 }

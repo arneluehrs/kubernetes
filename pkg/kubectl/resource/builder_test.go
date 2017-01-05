@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -35,14 +36,16 @@ import (
 	"k8s.io/kubernetes/pkg/api/resource"
 	"k8s.io/kubernetes/pkg/api/testapi"
 	apitesting "k8s.io/kubernetes/pkg/api/testing"
-	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/api/v1"
-	"k8s.io/kubernetes/pkg/client/unversioned/fake"
+	"k8s.io/kubernetes/pkg/apimachinery/registered"
+	metav1 "k8s.io/kubernetes/pkg/apis/meta/v1"
+	"k8s.io/kubernetes/pkg/client/restclient/fake"
 	"k8s.io/kubernetes/pkg/runtime"
+	"k8s.io/kubernetes/pkg/runtime/serializer/streaming"
 	utilerrors "k8s.io/kubernetes/pkg/util/errors"
 	utiltesting "k8s.io/kubernetes/pkg/util/testing"
 	"k8s.io/kubernetes/pkg/watch"
-	watchjson "k8s.io/kubernetes/pkg/watch/json"
+	"k8s.io/kubernetes/pkg/watch/versioned"
 )
 
 func stringBody(body string) io.ReadCloser {
@@ -51,7 +54,8 @@ func stringBody(body string) io.ReadCloser {
 
 func watchBody(events ...watch.Event) string {
 	buf := &bytes.Buffer{}
-	enc := watchjson.NewEncoder(buf, testapi.Default.Codec())
+	codec := testapi.Default.Codec()
+	enc := versioned.NewEncoder(streaming.NewEncoder(buf, codec), codec)
 	for _, e := range events {
 		enc.Encode(&e)
 	}
@@ -67,7 +71,7 @@ func fakeClient() ClientMapper {
 func fakeClientWith(testName string, t *testing.T, data map[string]string) ClientMapper {
 	return ClientMapperFunc(func(*meta.RESTMapping) (RESTClient, error) {
 		return &fake.RESTClient{
-			Codec: testapi.Default.Codec(),
+			NegotiatedSerializer: testapi.Default.NegotiatedSerializer(),
 			Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
 				p := req.URL.Path
 				q := req.URL.RawQuery
@@ -78,8 +82,11 @@ func fakeClientWith(testName string, t *testing.T, data map[string]string) Clien
 				if !ok {
 					t.Fatalf("%s: unexpected request: %s (%s)\n%#v", testName, p, req.URL, req)
 				}
+				header := http.Header{}
+				header.Set("Content-Type", runtime.ContentTypeJSON)
 				return &http.Response{
 					StatusCode: http.StatusOK,
+					Header:     header,
 					Body:       stringBody(body),
 				}, nil
 			}),
@@ -89,7 +96,7 @@ func fakeClientWith(testName string, t *testing.T, data map[string]string) Clien
 
 func testData() (*api.PodList, *api.ServiceList) {
 	pods := &api.PodList{
-		ListMeta: unversioned.ListMeta{
+		ListMeta: metav1.ListMeta{
 			ResourceVersion: "15",
 		},
 		Items: []api.Pod{
@@ -104,7 +111,7 @@ func testData() (*api.PodList, *api.ServiceList) {
 		},
 	}
 	svc := &api.ServiceList{
-		ListMeta: unversioned.ListMeta{
+		ListMeta: metav1.ListMeta{
 			ResourceVersion: "16",
 		},
 		Items: []api.Service{
@@ -184,7 +191,7 @@ func (v *testVisitor) Objects() []runtime.Object {
 var aPod string = `
 {
     "kind": "Pod",
-		"apiVersion": "` + testapi.Default.GroupVersion().String() + `",
+		"apiVersion": "` + registered.GroupOrDie(api.GroupName).GroupVersion.String() + `",
     "metadata": {
         "name": "busybox{id}",
         "labels": {
@@ -211,7 +218,7 @@ var aPod string = `
 var aRC string = `
 {
     "kind": "ReplicationController",
-		"apiVersion": "` + testapi.Default.GroupVersion().String() + `",
+		"apiVersion": "` + registered.GroupOrDie(api.GroupName).GroupVersion.String() + `",
     "metadata": {
         "name": "busybox{id}",
         "labels": {
@@ -248,7 +255,7 @@ var aRC string = `
 
 func TestPathBuilderAndVersionedObjectNotDefaulted(t *testing.T) {
 	b := NewBuilder(testapi.Default.RESTMapper(), api.Scheme, fakeClient(), testapi.Default.Codec()).
-		FilenameParam(false, false, "../../../docs/user-guide/update-demo/kitten-rc.yaml")
+		FilenameParam(false, &FilenameOptions{Recursive: false, Filenames: []string{"../../../test/fixtures/pkg/kubectl/builder/kitten-rc.yaml"}})
 
 	test := &testVisitor{}
 	singular := false
@@ -351,7 +358,7 @@ func TestPathBuilderWithMultiple(t *testing.T) {
 
 	for _, test := range tests {
 		b := NewBuilder(testapi.Default.RESTMapper(), api.Scheme, fakeClient(), testapi.Default.Codec()).
-			FilenameParam(false, test.recursive, test.directory).
+			FilenameParam(false, &FilenameOptions{Recursive: test.recursive, Filenames: []string{test.directory}}).
 			NamespaceParam("test").DefaultNamespace()
 
 		testVisitor := &testVisitor{}
@@ -410,7 +417,7 @@ func TestPathBuilderWithMultipleInvalid(t *testing.T) {
 
 	for _, test := range tests {
 		b := NewBuilder(testapi.Default.RESTMapper(), api.Scheme, fakeClient(), testapi.Default.Codec()).
-			FilenameParam(false, test.recursive, test.directory).
+			FilenameParam(false, &FilenameOptions{Recursive: test.recursive, Filenames: []string{test.directory}}).
 			NamespaceParam("test").DefaultNamespace()
 
 		testVisitor := &testVisitor{}
@@ -425,7 +432,7 @@ func TestPathBuilderWithMultipleInvalid(t *testing.T) {
 
 func TestDirectoryBuilder(t *testing.T) {
 	b := NewBuilder(testapi.Default.RESTMapper(), api.Scheme, fakeClient(), testapi.Default.Codec()).
-		FilenameParam(false, false, "../../../examples/guestbook/legacy").
+		FilenameParam(false, &FilenameOptions{Recursive: false, Filenames: []string{"../../../examples/guestbook/legacy"}}).
 		NamespaceParam("test").DefaultNamespace()
 
 	test := &testVisitor{}
@@ -440,6 +447,7 @@ func TestDirectoryBuilder(t *testing.T) {
 	for _, info := range test.Infos {
 		if info.Name == "redis-master" && info.Namespace == "test" && info.Object != nil {
 			found = true
+			break
 		}
 	}
 	if !found {
@@ -455,7 +463,7 @@ func TestNamespaceOverride(t *testing.T) {
 	defer s.Close()
 
 	b := NewBuilder(testapi.Default.RESTMapper(), api.Scheme, fakeClient(), testapi.Default.Codec()).
-		FilenameParam(false, false, s.URL).
+		FilenameParam(false, &FilenameOptions{Recursive: false, Filenames: []string{s.URL}}).
 		NamespaceParam("test")
 
 	test := &testVisitor{}
@@ -466,7 +474,7 @@ func TestNamespaceOverride(t *testing.T) {
 	}
 
 	b = NewBuilder(testapi.Default.RESTMapper(), api.Scheme, fakeClient(), testapi.Default.Codec()).
-		FilenameParam(true, false, s.URL).
+		FilenameParam(true, &FilenameOptions{Recursive: false, Filenames: []string{s.URL}}).
 		NamespaceParam("test")
 
 	test = &testVisitor{}
@@ -486,7 +494,7 @@ func TestURLBuilder(t *testing.T) {
 	defer s.Close()
 
 	b := NewBuilder(testapi.Default.RESTMapper(), api.Scheme, fakeClient(), testapi.Default.Codec()).
-		FilenameParam(false, false, s.URL).
+		FilenameParam(false, &FilenameOptions{Recursive: false, Filenames: []string{s.URL}}).
 		NamespaceParam("foo")
 
 	test := &testVisitor{}
@@ -515,7 +523,7 @@ func TestURLBuilderRequireNamespace(t *testing.T) {
 	defer s.Close()
 
 	b := NewBuilder(testapi.Default.RESTMapper(), api.Scheme, fakeClient(), testapi.Default.Codec()).
-		FilenameParam(false, false, s.URL).
+		FilenameParam(false, &FilenameOptions{Recursive: false, Filenames: []string{s.URL}}).
 		NamespaceParam("test").RequireNamespace()
 
 	test := &testVisitor{}
@@ -620,6 +628,28 @@ func TestResourceNames(t *testing.T) {
 	}
 }
 
+func TestResourceNamesWithoutResource(t *testing.T) {
+	pods, svc := testData()
+	b := NewBuilder(testapi.Default.RESTMapper(), api.Scheme, fakeClientWith("", t, map[string]string{
+		"/namespaces/test/pods/foo":     runtime.EncodeOrDie(testapi.Default.Codec(), &pods.Items[0]),
+		"/namespaces/test/services/baz": runtime.EncodeOrDie(testapi.Default.Codec(), &svc.Items[0]),
+	}), testapi.Default.Codec()).
+		NamespaceParam("test")
+
+	test := &testVisitor{}
+
+	if b.Do().Err() == nil {
+		t.Errorf("unexpected non-error")
+	}
+
+	b.ResourceNames("", "foo", "services/baz")
+
+	err := b.Do().Visit(test.Handle)
+	if err == nil || !strings.Contains(err.Error(), "must be RESOURCE/NAME") {
+		t.Fatalf("unexpected response: %v", err)
+	}
+}
+
 func TestResourceByNameWithoutRequireObject(t *testing.T) {
 	b := NewBuilder(testapi.Default.RESTMapper(), api.Scheme, fakeClientWith("", t, map[string]string{}), testapi.Default.Codec()).
 		NamespaceParam("test")
@@ -682,7 +712,7 @@ func TestResourceByNameAndEmptySelector(t *testing.T) {
 
 func TestSelector(t *testing.T) {
 	pods, svc := testData()
-	labelKey := unversioned.LabelSelectorQueryParam(testapi.Default.GroupVersion().String())
+	labelKey := metav1.LabelSelectorQueryParam(registered.GroupOrDie(api.GroupName).GroupVersion.String())
 	b := NewBuilder(testapi.Default.RESTMapper(), api.Scheme, fakeClientWith("", t, map[string]string{
 		"/namespaces/test/pods?" + labelKey + "=a%3Db":     runtime.EncodeOrDie(testapi.Default.Codec(), pods),
 		"/namespaces/test/services?" + labelKey + "=a%3Db": runtime.EncodeOrDie(testapi.Default.Codec(), svc),
@@ -913,7 +943,7 @@ func TestContinueOnErrorVisitor(t *testing.T) {
 func TestSingularObject(t *testing.T) {
 	obj, err := NewBuilder(testapi.Default.RESTMapper(), api.Scheme, fakeClient(), testapi.Default.Codec()).
 		NamespaceParam("test").DefaultNamespace().
-		FilenameParam(false, false, "../../../examples/guestbook/legacy/redis-master-controller.yaml").
+		FilenameParam(false, &FilenameOptions{Recursive: false, Filenames: []string{"../../../examples/guestbook/legacy/redis-master-controller.yaml"}}).
 		Flatten().
 		Do().Object()
 
@@ -933,7 +963,7 @@ func TestSingularObject(t *testing.T) {
 func TestSingularObjectNoExtension(t *testing.T) {
 	obj, err := NewBuilder(testapi.Default.RESTMapper(), api.Scheme, fakeClient(), testapi.Default.Codec()).
 		NamespaceParam("test").DefaultNamespace().
-		FilenameParam(false, false, "../../../examples/pod").
+		FilenameParam(false, &FilenameOptions{Recursive: false, Filenames: []string{"../../../examples/pod"}}).
 		Flatten().
 		Do().Object()
 
@@ -977,7 +1007,7 @@ func TestSingularRootScopedObject(t *testing.T) {
 
 func TestListObject(t *testing.T) {
 	pods, _ := testData()
-	labelKey := unversioned.LabelSelectorQueryParam(testapi.Default.GroupVersion().String())
+	labelKey := metav1.LabelSelectorQueryParam(registered.GroupOrDie(api.GroupName).GroupVersion.String())
 	b := NewBuilder(testapi.Default.RESTMapper(), api.Scheme, fakeClientWith("", t, map[string]string{
 		"/namespaces/test/pods?" + labelKey + "=a%3Db": runtime.EncodeOrDie(testapi.Default.Codec(), pods),
 	}), testapi.Default.Codec()).
@@ -1010,7 +1040,7 @@ func TestListObject(t *testing.T) {
 
 func TestListObjectWithDifferentVersions(t *testing.T) {
 	pods, svc := testData()
-	labelKey := unversioned.LabelSelectorQueryParam(testapi.Default.GroupVersion().String())
+	labelKey := metav1.LabelSelectorQueryParam(registered.GroupOrDie(api.GroupName).GroupVersion.String())
 	obj, err := NewBuilder(testapi.Default.RESTMapper(), api.Scheme, fakeClientWith("", t, map[string]string{
 		"/namespaces/test/pods?" + labelKey + "=a%3Db":     runtime.EncodeOrDie(testapi.Default.Codec(), pods),
 		"/namespaces/test/services?" + labelKey + "=a%3Db": runtime.EncodeOrDie(testapi.Default.Codec(), svc),
@@ -1044,7 +1074,7 @@ func TestWatch(t *testing.T) {
 		}),
 	}), testapi.Default.Codec()).
 		NamespaceParam("test").DefaultNamespace().
-		FilenameParam(false, false, "../../../examples/guestbook/redis-master-service.yaml").Flatten().
+		FilenameParam(false, &FilenameOptions{Recursive: false, Filenames: []string{"../../../examples/guestbook/redis-master-service.yaml"}}).Flatten().
 		Do().Watch("12")
 
 	if err != nil {
@@ -1071,8 +1101,8 @@ func TestWatch(t *testing.T) {
 func TestWatchMultipleError(t *testing.T) {
 	_, err := NewBuilder(testapi.Default.RESTMapper(), api.Scheme, fakeClient(), testapi.Default.Codec()).
 		NamespaceParam("test").DefaultNamespace().
-		FilenameParam(false, false, "../../../examples/guestbook/legacy/redis-master-controller.yaml").Flatten().
-		FilenameParam(false, false, "../../../examples/guestbook/legacy/redis-master-controller.yaml").Flatten().
+		FilenameParam(false, &FilenameOptions{Recursive: false, Filenames: []string{"../../../examples/guestbook/legacy/redis-master-controller.yaml"}}).Flatten().
+		FilenameParam(false, &FilenameOptions{Recursive: false, Filenames: []string{"../../../examples/guestbook/legacy/redis-master-controller.yaml"}}).Flatten().
 		Do().Watch("")
 
 	if err == nil {
@@ -1149,40 +1179,8 @@ func TestReceiveMultipleErrors(t *testing.T) {
 	}
 }
 
-func TestReplaceAliases(t *testing.T) {
-	tests := []struct {
-		name     string
-		arg      string
-		expected string
-	}{
-		{
-			name:     "no-replacement",
-			arg:      "service",
-			expected: "service",
-		},
-		{
-			name:     "all-replacement",
-			arg:      "all",
-			expected: "rc,svc,pods,pvc",
-		},
-		{
-			name:     "alias-in-comma-separated-arg",
-			arg:      "all,secrets",
-			expected: "rc,svc,pods,pvc,secrets",
-		},
-	}
-
-	b := NewBuilder(testapi.Default.RESTMapper(), api.Scheme, fakeClient(), testapi.Default.Codec())
-
-	for _, test := range tests {
-		replaced := b.replaceAliases(test.arg)
-		if replaced != test.expected {
-			t.Errorf("%s: unexpected argument: expected %s, got %s", test.name, test.expected, replaced)
-		}
-	}
-}
-
 func TestHasNames(t *testing.T) {
+	basename := filepath.Base(os.Args[0])
 	tests := []struct {
 		args            []string
 		expectedHasName bool
@@ -1226,16 +1224,70 @@ func TestHasNames(t *testing.T) {
 		{
 			args:            []string{"rc/foo", "bar"},
 			expectedHasName: false,
-			expectedError:   fmt.Errorf("when passing arguments in resource/name form, all arguments must include the resource"),
+			expectedError:   fmt.Errorf("there is no need to specify a resource type as a separate argument when passing arguments in resource/name form (e.g. '" + basename + " get resource/<resource_name>' instead of '" + basename + " get resource resource/<resource_name>'"),
 		},
 	}
 	for _, test := range tests {
 		hasNames, err := HasNames(test.args)
 		if !reflect.DeepEqual(test.expectedError, err) {
-			t.Errorf("expected HasName to error %v, got %s", test.expectedError, err)
+			t.Errorf("expected HasName to error:\n%s\tgot:\n%s", test.expectedError, err)
 		}
 		if hasNames != test.expectedHasName {
 			t.Errorf("expected HasName to return %v for %s", test.expectedHasName, test.args)
+		}
+	}
+}
+
+func TestMultipleTypesRequested(t *testing.T) {
+	tests := []struct {
+		args                  []string
+		expectedMultipleTypes bool
+	}{
+		{
+			args: []string{""},
+			expectedMultipleTypes: false,
+		},
+		{
+			args: []string{"all"},
+			expectedMultipleTypes: true,
+		},
+		{
+			args: []string{"rc"},
+			expectedMultipleTypes: false,
+		},
+		{
+			args: []string{"rc,pod,svc"},
+			expectedMultipleTypes: true,
+		},
+		{
+			args: []string{"rc/foo"},
+			expectedMultipleTypes: false,
+		},
+		{
+			args: []string{"rc/foo", "rc/bar"},
+			expectedMultipleTypes: false,
+		},
+		{
+			args: []string{"rc", "foo"},
+			expectedMultipleTypes: false,
+		},
+		{
+			args: []string{"rc,pod,svc", "foo"},
+			expectedMultipleTypes: true,
+		},
+		{
+			args: []string{"rc,secrets"},
+			expectedMultipleTypes: true,
+		},
+		{
+			args: []string{"rc/foo", "rc/bar", "svc/svc"},
+			expectedMultipleTypes: true,
+		},
+	}
+	for _, test := range tests {
+		hasMultipleTypes := MultipleTypesRequested(test.args)
+		if hasMultipleTypes != test.expectedMultipleTypes {
+			t.Errorf("expected HasName to return %v for %s", test.expectedMultipleTypes, test.args)
 		}
 	}
 }

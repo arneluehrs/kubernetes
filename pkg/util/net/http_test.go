@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright 2016 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,13 +17,68 @@ limitations under the License.
 package net
 
 import (
+	"crypto/tls"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"reflect"
+	"runtime"
+	"strings"
 	"testing"
+
+	"k8s.io/kubernetes/pkg/util/sets"
 )
+
+func TestCloneTLSConfig(t *testing.T) {
+	expected := sets.NewString(
+		// These fields are copied in CloneTLSConfig
+		"Rand",
+		"Time",
+		"Certificates",
+		"RootCAs",
+		"NextProtos",
+		"ServerName",
+		"InsecureSkipVerify",
+		"CipherSuites",
+		"PreferServerCipherSuites",
+		"MinVersion",
+		"MaxVersion",
+		"CurvePreferences",
+		"NameToCertificate",
+		"GetCertificate",
+		"ClientAuth",
+		"ClientCAs",
+		"ClientSessionCache",
+
+		// These fields are not copied
+		"SessionTicketsDisabled",
+		"SessionTicketKey",
+
+		// These fields are unexported
+		"serverInitOnce",
+		"mutex",
+		"sessionTicketKeys",
+	)
+
+	// See #33936.
+	if strings.HasPrefix(runtime.Version(), "go1.7") {
+		expected.Insert("DynamicRecordSizingDisabled", "Renegotiation")
+	}
+
+	fields := sets.NewString()
+	structType := reflect.TypeOf(tls.Config{})
+	for i := 0; i < structType.NumField(); i++ {
+		fields.Insert(structType.Field(i).Name)
+	}
+
+	if missing := expected.Difference(fields); len(missing) > 0 {
+		t.Errorf("Expected fields that were not seen in http.Transport: %v", missing.List())
+	}
+	if extra := fields.Difference(expected); len(extra) > 0 {
+		t.Errorf("New fields seen in http.Transport: %v\nAdd to CopyClientTLSConfig if client-relevant, then add to expected list in TestCopyClientTLSConfig", extra.List())
+	}
+}
 
 func TestGetClientIP(t *testing.T) {
 	ipString := "10.0.0.1"
@@ -76,7 +131,8 @@ func TestGetClientIP(t *testing.T) {
 		},
 		{
 			Request: http.Request{
-				RemoteAddr: ipString,
+				// RemoteAddr is in the form host:port
+				RemoteAddr: ipString + ":1234",
 			},
 			ExpectedIP: ip,
 		},
@@ -90,6 +146,7 @@ func TestGetClientIP(t *testing.T) {
 				Header: map[string][]string{
 					"X-Forwarded-For": {invalidIPString},
 				},
+				// RemoteAddr is in the form host:port
 				RemoteAddr: ipString,
 			},
 			ExpectedIP: ip,
@@ -98,7 +155,7 @@ func TestGetClientIP(t *testing.T) {
 
 	for i, test := range testCases {
 		if a, e := GetClientIP(&test.Request), test.ExpectedIP; reflect.DeepEqual(e, a) != true {
-			t.Fatalf("test case %d failed. expected: %v, actual: %v", i+1, e, a)
+			t.Fatalf("test case %d failed. expected: %v, actual: %v", i, e, a)
 		}
 	}
 }
@@ -164,5 +221,26 @@ func TestProxierWithNoProxyCIDR(t *testing.T) {
 			t.Errorf("%s: expected %v, got %v", test.name, test.expectedDelegated, actualDelegated)
 			continue
 		}
+	}
+}
+
+type fakeTLSClientConfigHolder struct {
+	called bool
+}
+
+func (f *fakeTLSClientConfigHolder) TLSClientConfig() *tls.Config {
+	f.called = true
+	return nil
+}
+func (f *fakeTLSClientConfigHolder) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func TestTLSClientConfigHolder(t *testing.T) {
+	rt := &fakeTLSClientConfigHolder{}
+	TLSClientConfig(rt)
+
+	if !rt.called {
+		t.Errorf("didn't find tls config")
 	}
 }

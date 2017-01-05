@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,23 +17,25 @@ limitations under the License.
 package resourcequota
 
 import (
+	"fmt"
 	"io"
-	"strings"
 	"time"
-
-	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 
 	"k8s.io/kubernetes/pkg/admission"
 	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
+	kubeapiserveradmission "k8s.io/kubernetes/pkg/kubeapiserver/admission"
 	"k8s.io/kubernetes/pkg/quota"
 	"k8s.io/kubernetes/pkg/quota/install"
 )
 
 func init() {
 	admission.RegisterPlugin("ResourceQuota",
-		func(client clientset.Interface, config io.Reader) (admission.Interface, error) {
-			registry := install.NewRegistry(client)
-			return NewResourceQuota(client, registry, 5)
+		func(config io.Reader) (admission.Interface, error) {
+			// NOTE: we do not provide informers to the registry because admission level decisions
+			// does not require us to open watches for all items tracked by quota.
+			registry := install.NewRegistry(nil, nil)
+			return NewResourceQuota(registry, 5, make(chan struct{}))
 		})
 }
 
@@ -41,8 +43,13 @@ func init() {
 type quotaAdmission struct {
 	*admission.Handler
 
-	evaluator *quotaEvaluator
+	stopCh        <-chan struct{}
+	registry      quota.Registry
+	numEvaluators int
+	evaluator     Evaluator
 }
+
+var _ = kubeapiserveradmission.WantsInternalClientSet(&quotaAdmission{})
 
 type liveLookupEntry struct {
 	expiry time.Time
@@ -52,17 +59,33 @@ type liveLookupEntry struct {
 // NewResourceQuota configures an admission controller that can enforce quota constraints
 // using the provided registry.  The registry must have the capability to handle group/kinds that
 // are persisted by the server this admission controller is intercepting
-func NewResourceQuota(client clientset.Interface, registry quota.Registry, numEvaluators int) (admission.Interface, error) {
-	evaluator, err := newQuotaEvaluator(client, registry)
-	if err != nil {
-		return nil, err
-	}
-	evaluator.Run(numEvaluators)
-
+func NewResourceQuota(registry quota.Registry, numEvaluators int, stopCh <-chan struct{}) (admission.Interface, error) {
 	return &quotaAdmission{
-		Handler:   admission.NewHandler(admission.Create, admission.Update),
-		evaluator: evaluator,
+		Handler:       admission.NewHandler(admission.Create, admission.Update),
+		stopCh:        stopCh,
+		registry:      registry,
+		numEvaluators: numEvaluators,
 	}, nil
+}
+
+func (a *quotaAdmission) SetInternalClientSet(client internalclientset.Interface) {
+	var err error
+	quotaAccessor, err := newQuotaAccessor(client)
+	if err != nil {
+		// TODO handle errors more cleanly
+		panic(err)
+	}
+	go quotaAccessor.Run(a.stopCh)
+
+	a.evaluator = NewQuotaEvaluator(quotaAccessor, a.registry, nil, a.numEvaluators, a.stopCh)
+}
+
+// Validate ensures an authorizer is set.
+func (a *quotaAdmission) Validate() error {
+	if a.evaluator == nil {
+		return fmt.Errorf("missing evaluator")
+	}
+	return nil
 }
 
 // Admit makes admission decisions while enforcing quota
@@ -72,40 +95,5 @@ func (q *quotaAdmission) Admit(a admission.Attributes) (err error) {
 		return nil
 	}
 
-	// if we do not know how to evaluate use for this kind, just ignore
-	evaluators := q.evaluator.registry.Evaluators()
-	evaluator, found := evaluators[a.GetKind().GroupKind()]
-	if !found {
-		return nil
-	}
-
-	// for this kind, check if the operation could mutate any quota resources
-	// if no resources tracked by quota are impacted, then just return
-	op := a.GetOperation()
-	operationResources := evaluator.OperationResources(op)
-	if len(operationResources) == 0 {
-		return nil
-	}
-
-	return q.evaluator.evaluate(a)
-}
-
-// prettyPrint formats a resource list for usage in errors
-func prettyPrint(item api.ResourceList) string {
-	parts := []string{}
-	for key, value := range item {
-		constraint := string(key) + "=" + value.String()
-		parts = append(parts, constraint)
-	}
-	return strings.Join(parts, ",")
-}
-
-// hasUsageStats returns true if for each hard constraint there is a value for its current usage
-func hasUsageStats(resourceQuota *api.ResourceQuota) bool {
-	for resourceName := range resourceQuota.Status.Hard {
-		if _, found := resourceQuota.Status.Used[resourceName]; !found {
-			return false
-		}
-	}
-	return true
+	return q.evaluator.Evaluate(a)
 }

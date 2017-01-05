@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,8 +21,8 @@ import (
 	"net/http"
 	"testing"
 
+	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/kubernetes/pkg/auth/authenticator"
-	"k8s.io/kubernetes/pkg/auth/user"
 )
 
 func TestAuthenticateRequest(t *testing.T) {
@@ -47,8 +47,27 @@ func TestAuthenticateRequestTokenInvalid(t *testing.T) {
 	user, ok, err := auth.AuthenticateRequest(&http.Request{
 		Header: http.Header{"Authorization": []string{"Bearer token"}},
 	})
-	if ok || user != nil || err != nil {
+	if ok || user != nil {
 		t.Errorf("expected not authenticated user")
+	}
+	if err != invalidToken {
+		t.Errorf("expected invalidToken error, got %v", err)
+	}
+}
+
+func TestAuthenticateRequestTokenInvalidCustomError(t *testing.T) {
+	customError := errors.New("custom")
+	auth := New(authenticator.TokenFunc(func(token string) (user.Info, bool, error) {
+		return nil, false, customError
+	}))
+	user, ok, err := auth.AuthenticateRequest(&http.Request{
+		Header: http.Header{"Authorization": []string{"Bearer token"}},
+	})
+	if ok || user != nil {
+		t.Errorf("expected not authenticated user")
+	}
+	if err != customError {
+		t.Errorf("expected custom error, got %v", err)
 	}
 }
 

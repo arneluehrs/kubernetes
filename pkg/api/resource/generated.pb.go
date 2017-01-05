@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright 2017 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,348 +26,45 @@ limitations under the License.
 
 	It has these top-level messages:
 		Quantity
-		QuantityProto
 */
 package resource
 
 import proto "github.com/gogo/protobuf/proto"
 import fmt "fmt"
 import math "math"
-import _ "github.com/gogo/protobuf/gogoproto"
-import _ "k8s.io/kubernetes/pkg/util/intstr"
-
-import io "io"
 
 // Reference imports to suppress errors if they are not otherwise used.
 var _ = proto.Marshal
 var _ = fmt.Errorf
 var _ = math.Inf
 
-func (m *Quantity) Reset()      { *m = Quantity{} }
-func (*Quantity) ProtoMessage() {}
+// This is a compile-time assertion to ensure that this generated file
+// is compatible with the proto package it is being compiled against.
+const _ = proto.GoGoProtoPackageIsVersion1
 
-func (m *QuantityProto) Reset()         { *m = QuantityProto{} }
-func (m *QuantityProto) String() string { return proto.CompactTextString(m) }
-func (*QuantityProto) ProtoMessage()    {}
+func (m *Quantity) Reset()                    { *m = Quantity{} }
+func (*Quantity) ProtoMessage()               {}
+func (*Quantity) Descriptor() ([]byte, []int) { return fileDescriptorGenerated, []int{0} }
 
 func init() {
 	proto.RegisterType((*Quantity)(nil), "k8s.io.kubernetes.pkg.api.resource.Quantity")
-	proto.RegisterType((*QuantityProto)(nil), "k8s.io.kubernetes.pkg.api.resource.QuantityProto")
-}
-func (m *QuantityProto) Marshal() (data []byte, err error) {
-	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
-	if err != nil {
-		return nil, err
-	}
-	return data[:n], nil
 }
 
-func (m *QuantityProto) MarshalTo(data []byte) (int, error) {
-	var i int
-	_ = i
-	var l int
-	_ = l
-	data[i] = 0xa
-	i++
-	i = encodeVarintGenerated(data, i, uint64(len(m.Format)))
-	i += copy(data[i:], m.Format)
-	data[i] = 0x10
-	i++
-	i = encodeVarintGenerated(data, i, uint64(m.Scale))
-	if m.Bigint != nil {
-		data[i] = 0x1a
-		i++
-		i = encodeVarintGenerated(data, i, uint64(len(m.Bigint)))
-		i += copy(data[i:], m.Bigint)
-	}
-	return i, nil
+var fileDescriptorGenerated = []byte{
+	// 236 bytes of a gzipped FileDescriptorProto
+	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x09, 0x6e, 0x88, 0x02, 0xff, 0x6c, 0x8f, 0xa1, 0x4e, 0x03, 0x41,
+	0x10, 0x86, 0x67, 0x0d, 0x29, 0x27, 0x1b, 0x42, 0x48, 0xc5, 0x5e, 0x53, 0x45, 0x48, 0xd8, 0x09,
+	0xa8, 0x06, 0xc9, 0x1b, 0x80, 0xc4, 0xdd, 0x95, 0x61, 0x99, 0x1c, 0xec, 0x6e, 0x76, 0x67, 0x05,
+	0xae, 0x12, 0x59, 0x89, 0xec, 0xbd, 0x4d, 0x65, 0x25, 0x02, 0xc1, 0x1d, 0x2f, 0x42, 0x72, 0xa5,
+	0x21, 0x21, 0xb8, 0xf9, 0xc4, 0x37, 0xf9, 0xfe, 0xe2, 0xb2, 0x99, 0x27, 0xc3, 0x1e, 0x9b, 0x5c,
+	0x53, 0x74, 0x24, 0x94, 0x30, 0x34, 0x16, 0xab, 0xc0, 0x18, 0x29, 0xf9, 0x1c, 0x17, 0x84, 0x96,
+	0x1c, 0xc5, 0x4a, 0xe8, 0xde, 0x84, 0xe8, 0xc5, 0x8f, 0x67, 0x3b, 0xc7, 0xfc, 0x3a, 0x26, 0x34,
+	0xd6, 0x54, 0x81, 0xcd, 0xde, 0x99, 0x9c, 0x5b, 0x96, 0xc7, 0x5c, 0x9b, 0x85, 0x7f, 0x46, 0xeb,
+	0xad, 0xc7, 0x41, 0xad, 0xf3, 0xc3, 0x40, 0x03, 0x0c, 0xd7, 0xee, 0xe5, 0xe4, 0xe2, 0xff, 0x8c,
+	0x2c, 0xfc, 0x84, 0xec, 0x24, 0x49, 0xfc, 0x5b, 0x31, 0x9b, 0x17, 0xa3, 0x9b, 0x5c, 0x39, 0x61,
+	0x79, 0x19, 0x1f, 0x17, 0x07, 0x49, 0x22, 0x3b, 0x7b, 0xa2, 0xa6, 0xea, 0xf4, 0xf0, 0xf6, 0x87,
+	0xae, 0x8e, 0xde, 0xd6, 0x25, 0xbc, 0xb6, 0x25, 0xac, 0xda, 0x12, 0xd6, 0x6d, 0x09, 0xcb, 0x8f,
+	0x29, 0x5c, 0x9f, 0x6d, 0x3a, 0x0d, 0xdb, 0x4e, 0xc3, 0x7b, 0xa7, 0x61, 0xd9, 0x6b, 0xb5, 0xe9,
+	0xb5, 0xda, 0xf6, 0x5a, 0x7d, 0xf6, 0x5a, 0xad, 0xbe, 0x34, 0xdc, 0x8d, 0xf6, 0x3b, 0xbe, 0x03,
+	0x00, 0x00, 0xff, 0xff, 0x90, 0x1c, 0x7f, 0xff, 0x20, 0x01, 0x00, 0x00,
 }
-
-func encodeFixed64Generated(data []byte, offset int, v uint64) int {
-	data[offset] = uint8(v)
-	data[offset+1] = uint8(v >> 8)
-	data[offset+2] = uint8(v >> 16)
-	data[offset+3] = uint8(v >> 24)
-	data[offset+4] = uint8(v >> 32)
-	data[offset+5] = uint8(v >> 40)
-	data[offset+6] = uint8(v >> 48)
-	data[offset+7] = uint8(v >> 56)
-	return offset + 8
-}
-func encodeFixed32Generated(data []byte, offset int, v uint32) int {
-	data[offset] = uint8(v)
-	data[offset+1] = uint8(v >> 8)
-	data[offset+2] = uint8(v >> 16)
-	data[offset+3] = uint8(v >> 24)
-	return offset + 4
-}
-func encodeVarintGenerated(data []byte, offset int, v uint64) int {
-	for v >= 1<<7 {
-		data[offset] = uint8(v&0x7f | 0x80)
-		v >>= 7
-		offset++
-	}
-	data[offset] = uint8(v)
-	return offset + 1
-}
-func (m *QuantityProto) Size() (n int) {
-	var l int
-	_ = l
-	l = len(m.Format)
-	n += 1 + l + sovGenerated(uint64(l))
-	n += 1 + sovGenerated(uint64(m.Scale))
-	if m.Bigint != nil {
-		l = len(m.Bigint)
-		n += 1 + l + sovGenerated(uint64(l))
-	}
-	return n
-}
-
-func sovGenerated(x uint64) (n int) {
-	for {
-		n++
-		x >>= 7
-		if x == 0 {
-			break
-		}
-	}
-	return n
-}
-func sozGenerated(x uint64) (n int) {
-	return sovGenerated(uint64((x << 1) ^ uint64((int64(x) >> 63))))
-}
-func (m *QuantityProto) Unmarshal(data []byte) error {
-	l := len(data)
-	iNdEx := 0
-	for iNdEx < l {
-		preIndex := iNdEx
-		var wire uint64
-		for shift := uint(0); ; shift += 7 {
-			if shift >= 64 {
-				return ErrIntOverflowGenerated
-			}
-			if iNdEx >= l {
-				return io.ErrUnexpectedEOF
-			}
-			b := data[iNdEx]
-			iNdEx++
-			wire |= (uint64(b) & 0x7F) << shift
-			if b < 0x80 {
-				break
-			}
-		}
-		fieldNum := int32(wire >> 3)
-		wireType := int(wire & 0x7)
-		if wireType == 4 {
-			return fmt.Errorf("proto: QuantityProto: wiretype end group for non-group")
-		}
-		if fieldNum <= 0 {
-			return fmt.Errorf("proto: QuantityProto: illegal tag %d (wire type %d)", fieldNum, wire)
-		}
-		switch fieldNum {
-		case 1:
-			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field Format", wireType)
-			}
-			var stringLen uint64
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowGenerated
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := data[iNdEx]
-				iNdEx++
-				stringLen |= (uint64(b) & 0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-			intStringLen := int(stringLen)
-			if intStringLen < 0 {
-				return ErrInvalidLengthGenerated
-			}
-			postIndex := iNdEx + intStringLen
-			if postIndex > l {
-				return io.ErrUnexpectedEOF
-			}
-			m.Format = Format(data[iNdEx:postIndex])
-			iNdEx = postIndex
-		case 2:
-			if wireType != 0 {
-				return fmt.Errorf("proto: wrong wireType = %d for field Scale", wireType)
-			}
-			m.Scale = 0
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowGenerated
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := data[iNdEx]
-				iNdEx++
-				m.Scale |= (int32(b) & 0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-		case 3:
-			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field Bigint", wireType)
-			}
-			var byteLen int
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowGenerated
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := data[iNdEx]
-				iNdEx++
-				byteLen |= (int(b) & 0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-			if byteLen < 0 {
-				return ErrInvalidLengthGenerated
-			}
-			postIndex := iNdEx + byteLen
-			if postIndex > l {
-				return io.ErrUnexpectedEOF
-			}
-			m.Bigint = append(m.Bigint[:0], data[iNdEx:postIndex]...)
-			if m.Bigint == nil {
-				m.Bigint = []byte{}
-			}
-			iNdEx = postIndex
-		default:
-			iNdEx = preIndex
-			skippy, err := skipGenerated(data[iNdEx:])
-			if err != nil {
-				return err
-			}
-			if skippy < 0 {
-				return ErrInvalidLengthGenerated
-			}
-			if (iNdEx + skippy) > l {
-				return io.ErrUnexpectedEOF
-			}
-			iNdEx += skippy
-		}
-	}
-
-	if iNdEx > l {
-		return io.ErrUnexpectedEOF
-	}
-	return nil
-}
-func skipGenerated(data []byte) (n int, err error) {
-	l := len(data)
-	iNdEx := 0
-	for iNdEx < l {
-		var wire uint64
-		for shift := uint(0); ; shift += 7 {
-			if shift >= 64 {
-				return 0, ErrIntOverflowGenerated
-			}
-			if iNdEx >= l {
-				return 0, io.ErrUnexpectedEOF
-			}
-			b := data[iNdEx]
-			iNdEx++
-			wire |= (uint64(b) & 0x7F) << shift
-			if b < 0x80 {
-				break
-			}
-		}
-		wireType := int(wire & 0x7)
-		switch wireType {
-		case 0:
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return 0, ErrIntOverflowGenerated
-				}
-				if iNdEx >= l {
-					return 0, io.ErrUnexpectedEOF
-				}
-				iNdEx++
-				if data[iNdEx-1] < 0x80 {
-					break
-				}
-			}
-			return iNdEx, nil
-		case 1:
-			iNdEx += 8
-			return iNdEx, nil
-		case 2:
-			var length int
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return 0, ErrIntOverflowGenerated
-				}
-				if iNdEx >= l {
-					return 0, io.ErrUnexpectedEOF
-				}
-				b := data[iNdEx]
-				iNdEx++
-				length |= (int(b) & 0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-			iNdEx += length
-			if length < 0 {
-				return 0, ErrInvalidLengthGenerated
-			}
-			return iNdEx, nil
-		case 3:
-			for {
-				var innerWire uint64
-				var start int = iNdEx
-				for shift := uint(0); ; shift += 7 {
-					if shift >= 64 {
-						return 0, ErrIntOverflowGenerated
-					}
-					if iNdEx >= l {
-						return 0, io.ErrUnexpectedEOF
-					}
-					b := data[iNdEx]
-					iNdEx++
-					innerWire |= (uint64(b) & 0x7F) << shift
-					if b < 0x80 {
-						break
-					}
-				}
-				innerWireType := int(innerWire & 0x7)
-				if innerWireType == 4 {
-					break
-				}
-				next, err := skipGenerated(data[start:])
-				if err != nil {
-					return 0, err
-				}
-				iNdEx = start + next
-			}
-			return iNdEx, nil
-		case 4:
-			return iNdEx, nil
-		case 5:
-			iNdEx += 4
-			return iNdEx, nil
-		default:
-			return 0, fmt.Errorf("proto: illegal wireType %d", wireType)
-		}
-	}
-	panic("unreachable")
-}
-
-var (
-	ErrInvalidLengthGenerated = fmt.Errorf("proto: negative length found during unmarshaling")
-	ErrIntOverflowGenerated   = fmt.Errorf("proto: integer overflow")
-)

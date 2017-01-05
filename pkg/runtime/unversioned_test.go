@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,19 +25,18 @@ import (
 	// pkg/conversion/test/... instead of importing pkg/api here.
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/testapi"
-	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/apis/extensions"
+	metav1 "k8s.io/kubernetes/pkg/apis/meta/v1"
 	"k8s.io/kubernetes/pkg/runtime"
 )
 
-var status = &unversioned.Status{
-	Status:  unversioned.StatusFailure,
-	Code:    200,
-	Reason:  unversioned.StatusReasonUnknown,
-	Message: "",
-}
-
 func TestV1EncodeDecodeStatus(t *testing.T) {
+	status := &metav1.Status{
+		Status:  metav1.StatusFailure,
+		Code:    200,
+		Reason:  metav1.StatusReasonUnknown,
+		Message: "",
+	}
 
 	v1Codec := testapi.Default.Codec()
 
@@ -45,7 +44,7 @@ func TestV1EncodeDecodeStatus(t *testing.T) {
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
-	typeMeta := unversioned.TypeMeta{}
+	typeMeta := metav1.TypeMeta{}
 	if err := json.Unmarshal(encoded, &typeMeta); err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -65,6 +64,12 @@ func TestV1EncodeDecodeStatus(t *testing.T) {
 }
 
 func TestExperimentalEncodeDecodeStatus(t *testing.T) {
+	status := &metav1.Status{
+		Status:  metav1.StatusFailure,
+		Code:    200,
+		Reason:  metav1.StatusReasonUnknown,
+		Message: "",
+	}
 	// TODO: caesarxuchao: use the testapi.Extensions.Codec() once the PR that
 	// moves experimental from v1 to v1beta1 got merged.
 	expCodec := api.Codecs.LegacyCodec(extensions.SchemeGroupVersion)
@@ -72,7 +77,7 @@ func TestExperimentalEncodeDecodeStatus(t *testing.T) {
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
-	typeMeta := unversioned.TypeMeta{}
+	typeMeta := metav1.TypeMeta{}
 	if err := json.Unmarshal(encoded, &typeMeta); err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}

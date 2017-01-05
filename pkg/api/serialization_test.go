@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,8 +17,11 @@ limitations under the License.
 package api_test
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"io/ioutil"
 	"math/rand"
 	"reflect"
 	"strings"
@@ -33,22 +36,30 @@ import (
 	"k8s.io/kubernetes/pkg/api/meta"
 	"k8s.io/kubernetes/pkg/api/testapi"
 	apitesting "k8s.io/kubernetes/pkg/api/testing"
-	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/api/v1"
+	"k8s.io/kubernetes/pkg/apis/extensions"
+	"k8s.io/kubernetes/pkg/apis/extensions/v1beta1"
+	metav1 "k8s.io/kubernetes/pkg/apis/meta/v1"
+	"k8s.io/kubernetes/pkg/conversion"
 	"k8s.io/kubernetes/pkg/runtime"
+	"k8s.io/kubernetes/pkg/runtime/schema"
+	"k8s.io/kubernetes/pkg/runtime/serializer/streaming"
 	"k8s.io/kubernetes/pkg/util/diff"
 	"k8s.io/kubernetes/pkg/util/sets"
+	"k8s.io/kubernetes/pkg/watch"
+	"k8s.io/kubernetes/pkg/watch/versioned"
 )
 
 var fuzzIters = flag.Int("fuzz-iters", 20, "How many fuzzing iterations to do.")
 
-var codecsToTest = []func(version unversioned.GroupVersion, item runtime.Object) (runtime.Codec, error){
-	func(version unversioned.GroupVersion, item runtime.Object) (runtime.Codec, error) {
-		return testapi.GetCodecForObject(item)
+var codecsToTest = []func(version schema.GroupVersion, item runtime.Object) (runtime.Codec, bool, error){
+	func(version schema.GroupVersion, item runtime.Object) (runtime.Codec, bool, error) {
+		c, err := testapi.GetCodecForObject(item)
+		return c, true, err
 	},
 }
 
-func fuzzInternalObject(t *testing.T, forVersion unversioned.GroupVersion, item runtime.Object, seed int64) runtime.Object {
+func fuzzInternalObject(t *testing.T, forVersion schema.GroupVersion, item runtime.Object, seed int64) runtime.Object {
 	apitesting.FuzzerFor(t, forVersion, rand.NewSource(seed)).Fuzz(item)
 
 	j, err := meta.TypeAccessor(item)
@@ -73,20 +84,36 @@ func dataAsString(data []byte) string {
 func roundTrip(t *testing.T, codec runtime.Codec, item runtime.Object) {
 	printer := spew.ConfigState{DisableMethods: true}
 
+	original := item
+	copied, err := api.Scheme.DeepCopy(item)
+	if err != nil {
+		panic(fmt.Sprintf("unable to copy: %v", err))
+	}
+	item = copied.(runtime.Object)
+
 	name := reflect.TypeOf(item).Elem().Name()
 	data, err := runtime.Encode(codec, item)
 	if err != nil {
-		t.Errorf("%v: %v (%s)", name, err, printer.Sprintf("%#v", item))
+		if runtime.IsNotRegisteredError(err) {
+			t.Logf("%v: not registered: %v (%s)", name, err, printer.Sprintf("%#v", item))
+		} else {
+			t.Errorf("%v: %v (%s)", name, err, printer.Sprintf("%#v", item))
+		}
+		return
+	}
+
+	if !api.Semantic.DeepEqual(original, item) {
+		t.Errorf("0: %v: encode altered the object, diff: %v", name, diff.ObjectReflectDiff(original, item))
 		return
 	}
 
 	obj2, err := runtime.Decode(codec, data)
 	if err != nil {
-		t.Errorf("0: %v: %v\nCodec: %v\nData: %s\nSource: %#v", name, err, codec, dataAsString(data), printer.Sprintf("%#v", item))
+		t.Errorf("0: %v: %v\nCodec: %#v\nData: %s\nSource: %#v", name, err, codec, dataAsString(data), printer.Sprintf("%#v", item))
 		panic("failed")
 	}
-	if !api.Semantic.DeepEqual(item, obj2) {
-		t.Errorf("\n1: %v: diff: %v\nCodec: %v\nSource:\n\n%#v\n\nEncoded:\n\n%s\n\nFinal:\n\n%#v", name, diff.ObjectGoPrintDiff(item, obj2), codec, printer.Sprintf("%#v", item), dataAsString(data), printer.Sprintf("%#v", obj2))
+	if !api.Semantic.DeepEqual(original, obj2) {
+		t.Errorf("\n1: %v: diff: %v\nCodec: %#v\nSource:\n\n%#v\n\nEncoded:\n\n%s\n\nFinal:\n\n%#v", name, diff.ObjectReflectDiff(item, obj2), codec, printer.Sprintf("%#v", item), dataAsString(data), printer.Sprintf("%#v", obj2))
 		return
 	}
 
@@ -96,7 +123,7 @@ func roundTrip(t *testing.T, codec runtime.Codec, item runtime.Object) {
 		return
 	}
 	if !api.Semantic.DeepEqual(item, obj3) {
-		t.Errorf("3: %v: diff: %v\nCodec: %v", name, diff.ObjectDiff(item, obj3), codec)
+		t.Errorf("3: %v: diff: %v\nCodec: %#v", name, diff.ObjectReflectDiff(item, obj3), codec)
 		return
 	}
 }
@@ -110,10 +137,13 @@ func roundTripSame(t *testing.T, group testapi.TestGroup, item runtime.Object, e
 	version := *group.GroupVersion()
 	codecs := []runtime.Codec{}
 	for _, fn := range codecsToTest {
-		codec, err := fn(version, item)
+		codec, ok, err := fn(version, item)
 		if err != nil {
 			t.Errorf("unable to get codec: %v", err)
 			return
+		}
+		if !ok {
+			continue
 		}
 		codecs = append(codecs, codec)
 	}
@@ -123,6 +153,65 @@ func roundTripSame(t *testing.T, group testapi.TestGroup, item runtime.Object, e
 		for _, codec := range codecs {
 			roundTrip(t, codec, item)
 		}
+	}
+}
+
+func Convert_v1beta1_ReplicaSet_to_api_ReplicationController(in *v1beta1.ReplicaSet, out *api.ReplicationController, s conversion.Scope) error {
+	intermediate1 := &extensions.ReplicaSet{}
+	if err := v1beta1.Convert_v1beta1_ReplicaSet_To_extensions_ReplicaSet(in, intermediate1, s); err != nil {
+		return err
+	}
+
+	intermediate2 := &v1.ReplicationController{}
+	if err := v1.Convert_extensions_ReplicaSet_to_v1_ReplicationController(intermediate1, intermediate2, s); err != nil {
+		return err
+	}
+
+	return v1.Convert_v1_ReplicationController_To_api_ReplicationController(intermediate2, out, s)
+}
+
+func TestSetControllerConversion(t *testing.T) {
+	if err := api.Scheme.AddConversionFuncs(Convert_v1beta1_ReplicaSet_to_api_ReplicationController); err != nil {
+		t.Fatal(err)
+	}
+
+	rs := &extensions.ReplicaSet{}
+	rc := &api.ReplicationController{}
+
+	extGroup := testapi.Extensions
+	defaultGroup := testapi.Default
+
+	fuzzInternalObject(t, extGroup.InternalGroupVersion(), rs, rand.Int63())
+
+	t.Logf("rs._internal.extensions -> rs.v1beta1.extensions")
+	data, err := runtime.Encode(extGroup.Codec(), rs)
+	if err != nil {
+		t.Fatalf("unexpected encoding error: %v", err)
+	}
+
+	decoder := api.Codecs.DecoderToVersion(
+		api.Codecs.UniversalDeserializer(),
+		runtime.NewMultiGroupVersioner(
+			*defaultGroup.GroupVersion(),
+			schema.GroupKind{Group: defaultGroup.GroupVersion().Group},
+			schema.GroupKind{Group: extGroup.GroupVersion().Group},
+		),
+	)
+
+	t.Logf("rs.v1beta1.extensions -> rc._internal")
+	if err := runtime.DecodeInto(decoder, data, rc); err != nil {
+		t.Fatalf("unexpected decoding error: %v", err)
+	}
+
+	t.Logf("rc._internal -> rc.v1")
+	data, err = runtime.Encode(defaultGroup.Codec(), rc)
+	if err != nil {
+		t.Fatalf("unexpected encoding error: %v", err)
+	}
+
+	t.Logf("rc.v1 -> rs._internal.extensions")
+	if err := runtime.DecodeInto(decoder, data, rs); err != nil {
+		t.Fatalf("unexpected decoding error: %v", err)
 	}
 }
 
@@ -149,12 +238,49 @@ func TestList(t *testing.T) {
 
 var nonRoundTrippableTypes = sets.NewString(
 	"ExportOptions",
+	"GetOptions",
 	// WatchEvent does not include kind and version and can only be deserialized
 	// implicitly (if the caller expects the specific object). The watch call defines
 	// the schema by content type, rather than via kind/version included in each
 	// object.
 	"WatchEvent",
 )
+
+var commonKinds = []string{"Status", "ListOptions", "DeleteOptions", "ExportOptions"}
+
+// verify all external group/versions have the common kinds registered.
+func TestCommonKindsRegistered(t *testing.T) {
+	for _, kind := range commonKinds {
+		for _, group := range testapi.Groups {
+			gv := group.GroupVersion()
+			gvk := gv.WithKind(kind)
+			obj, err := api.Scheme.New(gvk)
+			if err != nil {
+				t.Error(err)
+			}
+			defaults := gv.WithKind("")
+			if _, got, err := api.Codecs.LegacyCodec().Decode([]byte(`{"kind":"`+kind+`"}`), &defaults, nil); err != nil || gvk != *got {
+				t.Errorf("expected %v: %v %v", gvk, got, err)
+			}
+			data, err := runtime.Encode(api.Codecs.LegacyCodec(*gv), obj)
+			if err != nil {
+				t.Errorf("expected %v: %v\n%s", gvk, err, string(data))
+				continue
+			}
+			if !bytes.Contains(data, []byte(`"kind":"`+kind+`","apiVersion":"`+gv.String()+`"`)) {
+				if kind != "Status" {
+					t.Errorf("expected %v: %v\n%s", gvk, err, string(data))
+					continue
+				}
+				// TODO: this is wrong, but legacy clients expect it
+				if !bytes.Contains(data, []byte(`"kind":"`+kind+`","apiVersion":"v1"`)) {
+					t.Errorf("expected %v: %v\n%s", gvk, err, string(data))
+					continue
+				}
+			}
+		}
+	}
+}
 
 var nonInternalRoundTrippableTypes = sets.NewString("List", "ListOptions", "ExportOptions")
 var nonRoundTrippableTypesByVersion = map[string][]string{}
@@ -206,6 +332,7 @@ func TestEncode_Ptr(t *testing.T) {
 			TerminationGracePeriodSeconds: &grace,
 
 			SecurityContext: &api.PodSecurityContext{},
+			Affinity:        &api.Affinity{},
 		},
 	}
 	obj := runtime.Object(pod)
@@ -233,18 +360,18 @@ func TestBadJSONRejection(t *testing.T) {
 		t.Errorf("Did not reject despite use of unknown type: %s", badJSONUnknownType)
 	}
 	/*badJSONKindMismatch := []byte(`{"kind": "Pod"}`)
-	if err2 := DecodeInto(badJSONKindMismatch, &Minion{}); err2 == nil {
+	if err2 := DecodeInto(badJSONKindMismatch, &Node{}); err2 == nil {
 		t.Errorf("Kind is set but doesn't match the object type: %s", badJSONKindMismatch)
 	}*/
 }
 
 func TestUnversionedTypes(t *testing.T) {
 	testcases := []runtime.Object{
-		&unversioned.Status{Status: "Failure", Message: "something went wrong"},
-		&unversioned.APIVersions{Versions: []string{"A", "B", "C"}},
-		&unversioned.APIGroupList{Groups: []unversioned.APIGroup{{Name: "mygroup"}}},
-		&unversioned.APIGroup{Name: "mygroup"},
-		&unversioned.APIResourceList{GroupVersion: "mygroup/myversion"},
+		&metav1.Status{Status: "Failure", Message: "something went wrong"},
+		&metav1.APIVersions{Versions: []string{"A", "B", "C"}},
+		&metav1.APIGroupList{Groups: []metav1.APIGroup{{Name: "mygroup"}}},
+		&metav1.APIGroup{Name: "mygroup"},
+		&metav1.APIResourceList{GroupVersion: "mygroup/myversion"},
 	}
 
 	for _, obj := range testcases {
@@ -269,6 +396,85 @@ func TestUnversionedTypes(t *testing.T) {
 	}
 }
 
+func TestObjectWatchFraming(t *testing.T) {
+	f := apitesting.FuzzerFor(nil, api.SchemeGroupVersion, rand.NewSource(benchmarkSeed))
+	secret := &api.Secret{}
+	f.Fuzz(secret)
+	secret.Data["binary"] = []byte{0x00, 0x10, 0x30, 0x55, 0xff, 0x00}
+	secret.Data["utf8"] = []byte("a string with \u0345 characters")
+	secret.Data["long"] = bytes.Repeat([]byte{0x01, 0x02, 0x03, 0x00}, 1000)
+	converted, _ := api.Scheme.ConvertToVersion(secret, v1.SchemeGroupVersion)
+	v1secret := converted.(*v1.Secret)
+	for _, info := range api.Codecs.SupportedMediaTypes() {
+		if info.StreamSerializer == nil {
+			continue
+		}
+		s := info.StreamSerializer
+		framer := s.Framer
+		embedded := info.Serializer
+		if embedded == nil {
+			t.Errorf("no embedded serializer for %s", info.MediaType)
+			continue
+		}
+		innerDecode := api.Codecs.DecoderToVersion(embedded, api.SchemeGroupVersion)
+
+		// write a single object through the framer and back out
+		obj := &bytes.Buffer{}
+		if err := s.Encode(v1secret, obj); err != nil {
+			t.Fatal(err)
+		}
+		out := &bytes.Buffer{}
+		w := framer.NewFrameWriter(out)
+		if n, err := w.Write(obj.Bytes()); err != nil || n != len(obj.Bytes()) {
+			t.Fatal(err)
+		}
+		sr := streaming.NewDecoder(framer.NewFrameReader(ioutil.NopCloser(out)), s)
+		resultSecret := &v1.Secret{}
+		res, _, err := sr.Decode(nil, resultSecret)
+		if err != nil {
+			t.Fatalf("%v:\n%s", err, hex.Dump(obj.Bytes()))
+		}
+		resultSecret.Kind = "Secret"
+		resultSecret.APIVersion = "v1"
+		if !api.Semantic.DeepEqual(v1secret, res) {
+			t.Fatalf("objects did not match: %s", diff.ObjectGoPrintDiff(v1secret, res))
+		}
+
+		// write a watch event through and back out
+		obj = &bytes.Buffer{}
+		if err := embedded.Encode(v1secret, obj); err != nil {
+			t.Fatal(err)
+		}
+		event := &versioned.Event{Type: string(watch.Added)}
+		event.Object.Raw = obj.Bytes()
+		obj = &bytes.Buffer{}
+		if err := s.Encode(event, obj); err != nil {
+			t.Fatal(err)
+		}
+		out = &bytes.Buffer{}
+		w = framer.NewFrameWriter(out)
+		if n, err := w.Write(obj.Bytes()); err != nil || n != len(obj.Bytes()) {
+			t.Fatal(err)
+		}
+		sr = streaming.NewDecoder(framer.NewFrameReader(ioutil.NopCloser(out)), s)
+		outEvent := &versioned.Event{}
+		res, _, err = sr.Decode(nil, outEvent)
+		if err != nil || outEvent.Type != string(watch.Added) {
+			t.Fatalf("%v: %#v", err, outEvent)
+		}
+		if outEvent.Object.Object == nil && outEvent.Object.Raw != nil {
+			outEvent.Object.Object, err = runtime.Decode(innerDecode, outEvent.Object.Raw)
+			if err != nil {
+				t.Fatalf("%v:\n%s", err, hex.Dump(outEvent.Object.Raw))
+			}
+		}
+
+		if !api.Semantic.DeepEqual(secret, outEvent.Object.Object) {
+			t.Fatalf("%s: did not match after frame decoding: %s", info.MediaType, diff.ObjectGoPrintDiff(secret, outEvent.Object.Object))
+		}
+	}
+}
+
 const benchmarkSeed = 100
 
 func benchmarkItems() []v1.Pod {
@@ -277,7 +483,8 @@ func benchmarkItems() []v1.Pod {
 	for i := range items {
 		var pod api.Pod
 		apiObjectFuzzer.Fuzz(&pod)
-		out, err := api.Scheme.ConvertToVersion(&pod, "v1")
+		pod.Spec.InitContainers, pod.Status.InitContainerStatuses = nil, nil
+		out, err := api.Scheme.ConvertToVersion(&pod, v1.SchemeGroupVersion)
 		if err != nil {
 			panic(err)
 		}
@@ -307,7 +514,7 @@ func BenchmarkEncodeCodecFromInternal(b *testing.B) {
 	width := len(items)
 	encodable := make([]api.Pod, width)
 	for i := range items {
-		if err := api.Scheme.Convert(&items[i], &encodable[i]); err != nil {
+		if err := api.Scheme.Convert(&items[i], &encodable[i], nil); err != nil {
 			b.Fatal(err)
 		}
 	}

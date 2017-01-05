@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,14 +19,17 @@ package nfs
 import (
 	"fmt"
 	"os"
+	"runtime"
 
+	"github.com/golang/glog"
 	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/v1"
 	"k8s.io/kubernetes/pkg/types"
+	"k8s.io/kubernetes/pkg/util/exec"
 	"k8s.io/kubernetes/pkg/util/mount"
 	"k8s.io/kubernetes/pkg/util/strings"
 	"k8s.io/kubernetes/pkg/volume"
-
-	"github.com/golang/glog"
+	"k8s.io/kubernetes/pkg/volume/util"
 )
 
 // This is the primary entrypoint for volume plugins.
@@ -36,18 +39,15 @@ import (
 func ProbeVolumePlugins(volumeConfig volume.VolumeConfig) []volume.VolumePlugin {
 	return []volume.VolumePlugin{
 		&nfsPlugin{
-			host:            nil,
-			newRecyclerFunc: newRecycler,
-			config:          volumeConfig,
+			host:   nil,
+			config: volumeConfig,
 		},
 	}
 }
 
 type nfsPlugin struct {
-	host volume.VolumeHost
-	// decouple creating recyclers by deferring to a function.  Allows for easier testing.
-	newRecyclerFunc func(spec *volume.Spec, host volume.VolumeHost, volumeConfig volume.VolumeConfig) (volume.Recycler, error)
-	config          volume.VolumeConfig
+	host   volume.VolumeHost
+	config volume.VolumeConfig
 }
 
 var _ volume.VolumePlugin = &nfsPlugin{}
@@ -63,8 +63,20 @@ func (plugin *nfsPlugin) Init(host volume.VolumeHost) error {
 	return nil
 }
 
-func (plugin *nfsPlugin) Name() string {
+func (plugin *nfsPlugin) GetPluginName() string {
 	return nfsPluginName
+}
+
+func (plugin *nfsPlugin) GetVolumeName(spec *volume.Spec) (string, error) {
+	volumeSource, _, err := getVolumeSource(spec)
+	if err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf(
+		"%v/%v",
+		volumeSource.Server,
+		volumeSource.Path), nil
 }
 
 func (plugin *nfsPlugin) CanSupport(spec *volume.Spec) bool {
@@ -72,28 +84,28 @@ func (plugin *nfsPlugin) CanSupport(spec *volume.Spec) bool {
 		(spec.Volume != nil && spec.Volume.NFS != nil)
 }
 
-func (plugin *nfsPlugin) GetAccessModes() []api.PersistentVolumeAccessMode {
-	return []api.PersistentVolumeAccessMode{
-		api.ReadWriteOnce,
-		api.ReadOnlyMany,
-		api.ReadWriteMany,
+func (plugin *nfsPlugin) RequiresRemount() bool {
+	return false
+}
+
+func (plugin *nfsPlugin) GetAccessModes() []v1.PersistentVolumeAccessMode {
+	return []v1.PersistentVolumeAccessMode{
+		v1.ReadWriteOnce,
+		v1.ReadOnlyMany,
+		v1.ReadWriteMany,
 	}
 }
 
-func (plugin *nfsPlugin) NewMounter(spec *volume.Spec, pod *api.Pod, _ volume.VolumeOptions) (volume.Mounter, error) {
+func (plugin *nfsPlugin) NewMounter(spec *volume.Spec, pod *v1.Pod, _ volume.VolumeOptions) (volume.Mounter, error) {
 	return plugin.newMounterInternal(spec, pod, plugin.host.GetMounter())
 }
 
-func (plugin *nfsPlugin) newMounterInternal(spec *volume.Spec, pod *api.Pod, mounter mount.Interface) (volume.Mounter, error) {
-	var source *api.NFSVolumeSource
-	var readOnly bool
-	if spec.Volume != nil && spec.Volume.NFS != nil {
-		source = spec.Volume.NFS
-		readOnly = spec.Volume.NFS.ReadOnly
-	} else {
-		source = spec.PersistentVolume.Spec.NFS
-		readOnly = spec.ReadOnly
+func (plugin *nfsPlugin) newMounterInternal(spec *volume.Spec, pod *v1.Pod, mounter mount.Interface) (volume.Mounter, error) {
+	source, readOnly, err := getVolumeSource(spec)
+	if err != nil {
+		return nil, err
 	}
+
 	return &nfsMounter{
 		nfs: &nfs{
 			volName: spec.Name(),
@@ -115,29 +127,65 @@ func (plugin *nfsPlugin) newUnmounterInternal(volName string, podUID types.UID, 
 	return &nfsUnmounter{&nfs{
 		volName: volName,
 		mounter: mounter,
-		pod:     &api.Pod{ObjectMeta: api.ObjectMeta{UID: podUID}},
+		pod:     &v1.Pod{ObjectMeta: v1.ObjectMeta{UID: podUID}},
 		plugin:  plugin,
 	}}, nil
 }
 
-func (plugin *nfsPlugin) NewRecycler(spec *volume.Spec) (volume.Recycler, error) {
-	return plugin.newRecyclerFunc(spec, plugin.host, plugin.config)
+func (plugin *nfsPlugin) NewRecycler(pvName string, spec *volume.Spec, eventRecorder volume.RecycleEventRecorder) (volume.Recycler, error) {
+	return newRecycler(pvName, spec, eventRecorder, plugin.host, plugin.config)
+}
+
+func (plugin *nfsPlugin) ConstructVolumeSpec(volumeName, mountPath string) (*volume.Spec, error) {
+	nfsVolume := &v1.Volume{
+		Name: volumeName,
+		VolumeSource: v1.VolumeSource{
+			NFS: &v1.NFSVolumeSource{
+				Path: volumeName,
+			},
+		},
+	}
+	return volume.NewSpecFromVolume(nfsVolume), nil
 }
 
 // NFS volumes represent a bare host file or directory mount of an NFS export.
 type nfs struct {
 	volName string
-	pod     *api.Pod
+	pod     *v1.Pod
 	mounter mount.Interface
 	plugin  *nfsPlugin
-	// decouple creating recyclers by deferring to a function.  Allows for easier testing.
-	newRecyclerFunc func(spec *volume.Spec, host volume.VolumeHost, volumeConfig volume.VolumeConfig) (volume.Recycler, error)
 	volume.MetricsNil
 }
 
 func (nfsVolume *nfs) GetPath() string {
 	name := nfsPluginName
 	return nfsVolume.plugin.host.GetPodVolumeDir(nfsVolume.pod.UID, strings.EscapeQualifiedNameForDisk(name), nfsVolume.volName)
+}
+
+// Checks prior to mount operations to verify that the required components (binaries, etc.)
+// to mount the volume are available on the underlying node.
+// If not, it returns an error
+func (nfsMounter *nfsMounter) CanMount() error {
+	exe := exec.New()
+	switch runtime.GOOS {
+	case "linux":
+		_, err1 := exe.Command("/bin/ls", "/sbin/mount.nfs").CombinedOutput()
+		_, err2 := exe.Command("/bin/ls", "/sbin/mount.nfs4").CombinedOutput()
+
+		if err1 != nil {
+			return fmt.Errorf("Required binary /sbin/mount.nfs is missing")
+		}
+		if err2 != nil {
+			return fmt.Errorf("Required binary /sbin/mount.nfs4 is missing")
+		}
+		return nil
+	case "darwin":
+		_, err := exe.Command("/bin/ls", "/sbin/mount_nfs").CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("Required binary /sbin/mount_nfs is missing")
+		}
+	}
+	return nil
 }
 
 type nfsMounter struct {
@@ -223,44 +271,22 @@ func (c *nfsUnmounter) TearDown() error {
 }
 
 func (c *nfsUnmounter) TearDownAt(dir string) error {
-	notMnt, err := c.mounter.IsLikelyNotMountPoint(dir)
-	if err != nil {
-		glog.Errorf("Error checking IsLikelyNotMountPoint: %v", err)
-		return err
-	}
-	if notMnt {
-		return os.Remove(dir)
-	}
-
-	if err := c.mounter.Unmount(dir); err != nil {
-		glog.Errorf("Unmounting failed: %v", err)
-		return err
-	}
-	notMnt, mntErr := c.mounter.IsLikelyNotMountPoint(dir)
-	if mntErr != nil {
-		glog.Errorf("IsLikelyNotMountPoint check failed: %v", mntErr)
-		return mntErr
-	}
-	if notMnt {
-		if err := os.Remove(dir); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return util.UnmountPath(dir, c.mounter)
 }
 
-func newRecycler(spec *volume.Spec, host volume.VolumeHost, volumeConfig volume.VolumeConfig) (volume.Recycler, error) {
+func newRecycler(pvName string, spec *volume.Spec, eventRecorder volume.RecycleEventRecorder, host volume.VolumeHost, volumeConfig volume.VolumeConfig) (volume.Recycler, error) {
 	if spec.PersistentVolume == nil || spec.PersistentVolume.Spec.NFS == nil {
 		return nil, fmt.Errorf("spec.PersistentVolumeSource.NFS is nil")
 	}
 	return &nfsRecycler{
-		name:    spec.Name(),
-		server:  spec.PersistentVolume.Spec.NFS.Server,
-		path:    spec.PersistentVolume.Spec.NFS.Path,
-		host:    host,
-		config:  volumeConfig,
-		timeout: volume.CalculateTimeoutForVolume(volumeConfig.RecyclerMinimumTimeout, volumeConfig.RecyclerTimeoutIncrement, spec.PersistentVolume),
+		name:          spec.Name(),
+		server:        spec.PersistentVolume.Spec.NFS.Server,
+		path:          spec.PersistentVolume.Spec.NFS.Path,
+		host:          host,
+		config:        volumeConfig,
+		timeout:       volume.CalculateTimeoutForVolume(volumeConfig.RecyclerMinimumTimeout, volumeConfig.RecyclerTimeoutIncrement, spec.PersistentVolume),
+		pvName:        pvName,
+		eventRecorder: eventRecorder,
 	}, nil
 }
 
@@ -273,6 +299,8 @@ type nfsRecycler struct {
 	config  volume.VolumeConfig
 	timeout int64
 	volume.MetricsNil
+	pvName        string
+	eventRecorder volume.RecycleEventRecorder
 }
 
 func (r *nfsRecycler) GetPath() string {
@@ -282,15 +310,30 @@ func (r *nfsRecycler) GetPath() string {
 // Recycle recycles/scrubs clean an NFS volume.
 // Recycle blocks until the pod has completed or any error occurs.
 func (r *nfsRecycler) Recycle() error {
-	pod := r.config.RecyclerPodTemplate
+	templateClone, err := api.Scheme.DeepCopy(r.config.RecyclerPodTemplate)
+	if err != nil {
+		return err
+	}
+	pod := templateClone.(*v1.Pod)
 	// overrides
 	pod.Spec.ActiveDeadlineSeconds = &r.timeout
 	pod.GenerateName = "pv-recycler-nfs-"
-	pod.Spec.Volumes[0].VolumeSource = api.VolumeSource{
-		NFS: &api.NFSVolumeSource{
+	pod.Spec.Volumes[0].VolumeSource = v1.VolumeSource{
+		NFS: &v1.NFSVolumeSource{
 			Server: r.server,
 			Path:   r.path,
 		},
 	}
-	return volume.RecycleVolumeByWatchingPodUntilCompletion(pod, r.host.GetKubeClient())
+	return volume.RecycleVolumeByWatchingPodUntilCompletion(r.pvName, pod, r.host.GetKubeClient(), r.eventRecorder)
+}
+
+func getVolumeSource(spec *volume.Spec) (*v1.NFSVolumeSource, bool, error) {
+	if spec.Volume != nil && spec.Volume.NFS != nil {
+		return spec.Volume.NFS, spec.Volume.NFS.ReadOnly, nil
+	} else if spec.PersistentVolume != nil &&
+		spec.PersistentVolume.Spec.NFS != nil {
+		return spec.PersistentVolume.Spec.NFS, spec.ReadOnly, nil
+	}
+
+	return nil, false, fmt.Errorf("Spec does not reference a NFS volume type")
 }

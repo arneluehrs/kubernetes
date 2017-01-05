@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@ limitations under the License.
 
 /* This test check that SecurityContext parameters specified at the
  * pod or the container level work as intended. These tests cannot be
- * run when the 'SecurityContextDeny' addmissioin controller is not used
+ * run when the 'SecurityContextDeny' admission controller is not used
  * so they are skipped by default.
  */
 
@@ -25,33 +25,34 @@ package e2e
 import (
 	"fmt"
 
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/api/v1"
+	metav1 "k8s.io/kubernetes/pkg/apis/meta/v1"
+	"k8s.io/kubernetes/pkg/util/uuid"
 	"k8s.io/kubernetes/test/e2e/framework"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 )
 
-func scTestPod(hostIPC bool, hostPID bool) *api.Pod {
-	podName := "security-context-" + string(util.NewUUID())
-	pod := &api.Pod{
-		ObjectMeta: api.ObjectMeta{
-			Name:   podName,
-			Labels: map[string]string{"name": podName},
+func scTestPod(hostIPC bool, hostPID bool) *v1.Pod {
+	podName := "security-context-" + string(uuid.NewUUID())
+	pod := &v1.Pod{
+		ObjectMeta: v1.ObjectMeta{
+			Name:        podName,
+			Labels:      map[string]string{"name": podName},
+			Annotations: map[string]string{},
 		},
-		Spec: api.PodSpec{
-			SecurityContext: &api.PodSecurityContext{
-				HostIPC: hostIPC,
-				HostPID: hostPID,
-			},
-			Containers: []api.Container{
+		Spec: v1.PodSpec{
+			HostIPC:         hostIPC,
+			HostPID:         hostPID,
+			SecurityContext: &v1.PodSecurityContext{},
+			Containers: []v1.Container{
 				{
 					Name:  "test-container",
 					Image: "gcr.io/google_containers/busybox:1.24",
 				},
 			},
-			RestartPolicy: api.RestartPolicyNever,
+			RestartPolicy: v1.RestartPolicyNever,
 		},
 	}
 
@@ -85,7 +86,7 @@ var _ = framework.KubeDescribe("Security Context [Feature:SecurityContext]", fun
 		var uid int64 = 1001
 		var overrideUid int64 = 1002
 		pod.Spec.SecurityContext.RunAsUser = &uid
-		pod.Spec.Containers[0].SecurityContext = new(api.SecurityContext)
+		pod.Spec.Containers[0].SecurityContext = new(v1.SecurityContext)
 		pod.Spec.Containers[0].SecurityContext.RunAsUser = &overrideUid
 		pod.Spec.Containers[0].Command = []string{"sh", "-c", "id -u"}
 
@@ -106,6 +107,37 @@ var _ = framework.KubeDescribe("Security Context [Feature:SecurityContext]", fun
 		testPodSELinuxLabeling(f, false, true)
 	})
 
+	It("should support seccomp alpha unconfined annotation on the container [Feature:Seccomp]", func() {
+		// TODO: port to SecurityContext as soon as seccomp is out of alpha
+		pod := scTestPod(false, false)
+		pod.Annotations[v1.SeccompContainerAnnotationKeyPrefix+"test-container"] = "unconfined"
+		pod.Annotations[v1.SeccompPodAnnotationKey] = "docker/default"
+		pod.Spec.Containers[0].Command = []string{"grep", "ecc", "/proc/self/status"}
+		f.TestContainerOutput(v1.SeccompPodAnnotationKey, pod, 0, []string{"0"}) // seccomp disabled
+	})
+
+	It("should support seccomp alpha unconfined annotation on the pod [Feature:Seccomp]", func() {
+		// TODO: port to SecurityContext as soon as seccomp is out of alpha
+		pod := scTestPod(false, false)
+		pod.Annotations[v1.SeccompPodAnnotationKey] = "unconfined"
+		pod.Spec.Containers[0].Command = []string{"grep", "ecc", "/proc/self/status"}
+		f.TestContainerOutput(v1.SeccompPodAnnotationKey, pod, 0, []string{"0"}) // seccomp disabled
+	})
+
+	It("should support seccomp alpha docker/default annotation [Feature:Seccomp]", func() {
+		// TODO: port to SecurityContext as soon as seccomp is out of alpha
+		pod := scTestPod(false, false)
+		pod.Annotations[v1.SeccompContainerAnnotationKeyPrefix+"test-container"] = "docker/default"
+		pod.Spec.Containers[0].Command = []string{"grep", "ecc", "/proc/self/status"}
+		f.TestContainerOutput(v1.SeccompPodAnnotationKey, pod, 0, []string{"2"}) // seccomp filtered
+	})
+
+	It("should support seccomp default which is unconfined [Feature:Seccomp]", func() {
+		// TODO: port to SecurityContext as soon as seccomp is out of alpha
+		pod := scTestPod(false, false)
+		pod.Spec.Containers[0].Command = []string{"grep", "ecc", "/proc/self/status"}
+		f.TestContainerOutput(v1.SeccompPodAnnotationKey, pod, 0, []string{"0"}) // seccomp disabled
+	})
 })
 
 func testPodSELinuxLabeling(f *framework.Framework, hostIPC bool, hostPID bool) {
@@ -114,33 +146,32 @@ func testPodSELinuxLabeling(f *framework.Framework, hostIPC bool, hostPID bool) 
 	pod := scTestPod(hostIPC, hostPID)
 	volumeName := "test-volume"
 	mountPath := "/mounted_volume"
-	pod.Spec.Containers[0].VolumeMounts = []api.VolumeMount{
+	pod.Spec.Containers[0].VolumeMounts = []v1.VolumeMount{
 		{
 			Name:      volumeName,
 			MountPath: mountPath,
 		},
 	}
-	pod.Spec.Volumes = []api.Volume{
+	pod.Spec.Volumes = []v1.Volume{
 		{
 			Name: volumeName,
-			VolumeSource: api.VolumeSource{
-				EmptyDir: &api.EmptyDirVolumeSource{
-					Medium: api.StorageMediumDefault,
+			VolumeSource: v1.VolumeSource{
+				EmptyDir: &v1.EmptyDirVolumeSource{
+					Medium: v1.StorageMediumDefault,
 				},
 			},
 		},
 	}
-	pod.Spec.SecurityContext.SELinuxOptions = &api.SELinuxOptions{
+	pod.Spec.SecurityContext.SELinuxOptions = &v1.SELinuxOptions{
 		Level: "s0:c0,c1",
 	}
 	pod.Spec.Containers[0].Command = []string{"sleep", "6000"}
 
-	client := f.Client.Pods(f.Namespace.Name)
-	_, err := client.Create(pod)
+	client := f.ClientSet.Core().Pods(f.Namespace.Name)
+	pod, err := client.Create(pod)
 
 	framework.ExpectNoError(err, "Error creating pod %v", pod)
-	defer client.Delete(pod.Name, nil)
-	framework.ExpectNoError(framework.WaitForPodRunningInNamespace(f.Client, pod.Name, f.Namespace.Name))
+	framework.ExpectNoError(framework.WaitForPodRunningInNamespace(f.ClientSet, pod))
 
 	testContent := "hello"
 	testFilePath := mountPath + "/TEST"
@@ -150,7 +181,7 @@ func testPodSELinuxLabeling(f *framework.Framework, hostIPC bool, hostPID bool) 
 	Expect(err).To(BeNil())
 	Expect(content).To(ContainSubstring(testContent))
 
-	foundPod, err := f.Client.Pods(f.Namespace.Name).Get(pod.Name)
+	foundPod, err := f.ClientSet.Core().Pods(f.Namespace.Name).Get(pod.Name, metav1.GetOptions{})
 	Expect(err).NotTo(HaveOccurred())
 
 	// Confirm that the file can be accessed from a second
@@ -159,17 +190,17 @@ func testPodSELinuxLabeling(f *framework.Framework, hostIPC bool, hostPID bool) 
 	By(fmt.Sprintf("confirming a container with the same label can read the file under --volume-dir=%s", framework.TestContext.KubeVolumeDir))
 	pod = scTestPod(hostIPC, hostPID)
 	pod.Spec.NodeName = foundPod.Spec.NodeName
-	volumeMounts := []api.VolumeMount{
+	volumeMounts := []v1.VolumeMount{
 		{
 			Name:      volumeName,
 			MountPath: mountPath,
 		},
 	}
-	volumes := []api.Volume{
+	volumes := []v1.Volume{
 		{
 			Name: volumeName,
-			VolumeSource: api.VolumeSource{
-				HostPath: &api.HostPathVolumeSource{
+			VolumeSource: v1.VolumeSource{
+				HostPath: &v1.HostPathVolumeSource{
 					Path: volumeHostPath,
 				},
 			},
@@ -178,7 +209,7 @@ func testPodSELinuxLabeling(f *framework.Framework, hostIPC bool, hostPID bool) 
 	pod.Spec.Containers[0].VolumeMounts = volumeMounts
 	pod.Spec.Volumes = volumes
 	pod.Spec.Containers[0].Command = []string{"cat", testFilePath}
-	pod.Spec.SecurityContext.SELinuxOptions = &api.SELinuxOptions{
+	pod.Spec.SecurityContext.SELinuxOptions = &v1.SELinuxOptions{
 		Level: "s0:c0,c1",
 	}
 
@@ -189,12 +220,11 @@ func testPodSELinuxLabeling(f *framework.Framework, hostIPC bool, hostPID bool) 
 	pod.Spec.Volumes = volumes
 	pod.Spec.Containers[0].VolumeMounts = volumeMounts
 	pod.Spec.Containers[0].Command = []string{"sleep", "6000"}
-	pod.Spec.SecurityContext.SELinuxOptions = &api.SELinuxOptions{
+	pod.Spec.SecurityContext.SELinuxOptions = &v1.SELinuxOptions{
 		Level: "s0:c2,c3",
 	}
 	_, err = client.Create(pod)
 	framework.ExpectNoError(err, "Error creating pod %v", pod)
-	defer client.Delete(pod.Name, nil)
 
 	err = f.WaitForPodRunning(pod.Name)
 	framework.ExpectNoError(err, "Error waiting for pod to run %v", pod)

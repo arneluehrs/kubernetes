@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,15 +23,16 @@ import (
 	"github.com/ghodss/yaml"
 	"github.com/ugorji/go/codec"
 
-	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/runtime"
+	"k8s.io/kubernetes/pkg/runtime/schema"
+	"k8s.io/kubernetes/pkg/runtime/serializer/recognizer"
 	"k8s.io/kubernetes/pkg/util/framer"
 	utilyaml "k8s.io/kubernetes/pkg/util/yaml"
 )
 
 // NewSerializer creates a JSON serializer that handles encoding versioned objects into the proper JSON form. If typer
 // is not nil, the object has the group, version, and kind fields set.
-func NewSerializer(meta MetaFactory, creater runtime.ObjectCreater, typer runtime.Typer, pretty bool) *Serializer {
+func NewSerializer(meta MetaFactory, creater runtime.ObjectCreater, typer runtime.ObjectTyper, pretty bool) *Serializer {
 	return &Serializer{
 		meta:    meta,
 		creater: creater,
@@ -44,7 +45,7 @@ func NewSerializer(meta MetaFactory, creater runtime.ObjectCreater, typer runtim
 // NewYAMLSerializer creates a YAML serializer that handles encoding versioned objects into the proper YAML form. If typer
 // is not nil, the object has the group, version, and kind fields set. This serializer supports only the subset of YAML that
 // matches JSON, and will error if constructs are used that do not serialize to JSON.
-func NewYAMLSerializer(meta MetaFactory, creater runtime.ObjectCreater, typer runtime.Typer) *Serializer {
+func NewYAMLSerializer(meta MetaFactory, creater runtime.ObjectCreater, typer runtime.ObjectTyper) *Serializer {
 	return &Serializer{
 		meta:    meta,
 		creater: creater,
@@ -56,20 +57,21 @@ func NewYAMLSerializer(meta MetaFactory, creater runtime.ObjectCreater, typer ru
 type Serializer struct {
 	meta    MetaFactory
 	creater runtime.ObjectCreater
-	typer   runtime.Typer
+	typer   runtime.ObjectTyper
 	yaml    bool
 	pretty  bool
 }
 
 // Serializer implements Serializer
 var _ runtime.Serializer = &Serializer{}
+var _ recognizer.RecognizingDecoder = &Serializer{}
 
 // Decode attempts to convert the provided data into YAML or JSON, extract the stored schema kind, apply the provided default gvk, and then
 // load that data into an object matching the desired schema kind or the provided into. If into is *runtime.Unknown, the raw data will be
 // extracted and no decoding will be performed. If into is not registered with the typer, then the object will be straight decoded using
 // normal JSON/YAML unmarshalling. If into is provided and the original data is not fully qualified with kind/version/group, the type of
 // the into will be used to alter the returned gvk. On success or most errors, the method will return the calculated schema kind.
-func (s *Serializer) Decode(originalData []byte, gvk *unversioned.GroupVersionKind, into runtime.Object) (runtime.Object, *unversioned.GroupVersionKind, error) {
+func (s *Serializer) Decode(originalData []byte, gvk *schema.GroupVersionKind, into runtime.Object) (runtime.Object, *schema.GroupVersionKind, error) {
 	if versioned, ok := into.(*runtime.VersionedObjects); ok {
 		into = versioned.Last()
 		obj, actual, err := s.Decode(originalData, gvk, into)
@@ -111,12 +113,12 @@ func (s *Serializer) Decode(originalData []byte, gvk *unversioned.GroupVersionKi
 	if unk, ok := into.(*runtime.Unknown); ok && unk != nil {
 		unk.Raw = originalData
 		unk.ContentType = runtime.ContentTypeJSON
-		unk.GetObjectKind().SetGroupVersionKind(actual)
+		unk.GetObjectKind().SetGroupVersionKind(*actual)
 		return unk, actual, nil
 	}
 
 	if into != nil {
-		typed, _, err := s.typer.ObjectKind(into)
+		types, _, err := s.typer.ObjectKinds(into)
 		switch {
 		case runtime.IsNotRegisteredError(err):
 			if err := codec.NewDecoderBytes(data, new(codec.JsonHandle)).Decode(into); err != nil {
@@ -126,6 +128,7 @@ func (s *Serializer) Decode(originalData []byte, gvk *unversioned.GroupVersionKi
 		case err != nil:
 			return nil, actual, err
 		default:
+			typed := types[0]
 			if len(actual.Kind) == 0 {
 				actual.Kind = typed.Kind
 			}
@@ -158,8 +161,8 @@ func (s *Serializer) Decode(originalData []byte, gvk *unversioned.GroupVersionKi
 	return obj, actual, nil
 }
 
-// EncodeToStream serializes the provided object to the given writer. Overrides is ignored.
-func (s *Serializer) EncodeToStream(obj runtime.Object, w io.Writer, overrides ...unversioned.GroupVersion) error {
+// Encode serializes the provided object to the given writer.
+func (s *Serializer) Encode(obj runtime.Object, w io.Writer) error {
 	if s.yaml {
 		json, err := json.Marshal(obj)
 		if err != nil {
@@ -186,20 +189,13 @@ func (s *Serializer) EncodeToStream(obj runtime.Object, w io.Writer, overrides .
 }
 
 // RecognizesData implements the RecognizingDecoder interface.
-func (s *Serializer) RecognizesData(peek io.Reader) (bool, error) {
-	_, ok := utilyaml.GuessJSONStream(peek, 2048)
+func (s *Serializer) RecognizesData(peek io.Reader) (ok, unknown bool, err error) {
 	if s.yaml {
-		return !ok, nil
+		// we could potentially look for '---'
+		return false, true, nil
 	}
-	return ok, nil
-}
-
-// EncodesAsText returns true because both JSON and YAML are considered textual representations
-// of data. This is used to determine whether the serialized object should be transmitted over
-// a WebSocket Text or Binary frame. This must remain true for legacy compatibility with v1.1
-// watch over websocket implementations.
-func (s *Serializer) EncodesAsText() bool {
-	return true
+	_, _, ok = utilyaml.GuessJSONStream(peek, 2048)
+	return ok, false, nil
 }
 
 // Framer is the default JSON framing behavior, with newlines delimiting individual objects.

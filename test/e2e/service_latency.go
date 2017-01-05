@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,14 +22,15 @@ import (
 	"strings"
 	"time"
 
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/v1"
 	"k8s.io/kubernetes/pkg/client/cache"
-	controllerframework "k8s.io/kubernetes/pkg/controller/framework"
+	"k8s.io/kubernetes/pkg/client/restclient"
 	"k8s.io/kubernetes/pkg/runtime"
 	"k8s.io/kubernetes/pkg/util/flowcontrol"
 	"k8s.io/kubernetes/pkg/util/sets"
 	"k8s.io/kubernetes/pkg/watch"
 	"k8s.io/kubernetes/test/e2e/framework"
+	testutils "k8s.io/kubernetes/test/utils"
 
 	. "github.com/onsi/ginkgo"
 )
@@ -66,9 +67,9 @@ var _ = framework.KubeDescribe("Service endpoints latency", func() {
 		)
 
 		// Turn off rate limiting--it interferes with our measurements.
-		oldThrottle := f.Client.RESTClient.Throttle
-		f.Client.RESTClient.Throttle = flowcontrol.NewFakeAlwaysRateLimiter()
-		defer func() { f.Client.RESTClient.Throttle = oldThrottle }()
+		oldThrottle := f.ClientSet.Core().RESTClient().GetRateLimiter()
+		f.ClientSet.Core().RESTClient().(*restclient.RESTClient).Throttle = flowcontrol.NewFakeAlwaysRateLimiter()
+		defer func() { f.ClientSet.Core().RESTClient().(*restclient.RESTClient).Throttle = oldThrottle }()
 
 		failing := sets.NewString()
 		d, err := runServiceLatencies(f, parallelTrials, totalTrials)
@@ -116,18 +117,18 @@ var _ = framework.KubeDescribe("Service endpoints latency", func() {
 })
 
 func runServiceLatencies(f *framework.Framework, inParallel, total int) (output []time.Duration, err error) {
-	cfg := framework.RCConfig{
-		Client:       f.Client,
-		Image:        "gcr.io/google_containers/pause:2.0",
-		Name:         "svc-latency-rc",
-		Namespace:    f.Namespace.Name,
-		Replicas:     1,
-		PollInterval: time.Second,
+	cfg := testutils.RCConfig{
+		Client:         f.ClientSet,
+		InternalClient: f.InternalClientset,
+		Image:          framework.GetPauseImageName(f.ClientSet),
+		Name:           "svc-latency-rc",
+		Namespace:      f.Namespace.Name,
+		Replicas:       1,
+		PollInterval:   time.Second,
 	}
 	if err := framework.RunRC(cfg); err != nil {
 		return nil, err
 	}
-	defer framework.DeleteRC(f.Client, f.Namespace.Name, cfg.Name)
 
 	// Run a single watcher, to reduce the number of API calls we have to
 	// make; this is to minimize the timing error. It's how kube-proxy
@@ -179,7 +180,7 @@ func runServiceLatencies(f *framework.Framework, inParallel, total int) (output 
 
 type endpointQuery struct {
 	endpointsName string
-	endpoints     *api.Endpoints
+	endpoints     *v1.Endpoints
 	result        chan<- struct{}
 }
 
@@ -188,7 +189,7 @@ type endpointQueries struct {
 
 	stop        chan struct{}
 	requestChan chan *endpointQuery
-	seenChan    chan *api.Endpoints
+	seenChan    chan *v1.Endpoints
 }
 
 func newQuerier() *endpointQueries {
@@ -197,7 +198,7 @@ func newQuerier() *endpointQueries {
 
 		stop:        make(chan struct{}, 100),
 		requestChan: make(chan *endpointQuery),
-		seenChan:    make(chan *api.Endpoints, 100),
+		seenChan:    make(chan *v1.Endpoints, 100),
 	}
 	go eq.join()
 	return eq
@@ -257,7 +258,7 @@ func (eq *endpointQueries) join() {
 }
 
 // request blocks until the requested endpoint is seen.
-func (eq *endpointQueries) request(endpointsName string) *api.Endpoints {
+func (eq *endpointQueries) request(endpointsName string) *v1.Endpoints {
 	result := make(chan struct{})
 	req := &endpointQuery{
 		endpointsName: endpointsName,
@@ -269,33 +270,34 @@ func (eq *endpointQueries) request(endpointsName string) *api.Endpoints {
 }
 
 // marks e as added; does not block.
-func (eq *endpointQueries) added(e *api.Endpoints) {
+func (eq *endpointQueries) added(e *v1.Endpoints) {
 	eq.seenChan <- e
 }
 
 // blocks until it has finished syncing.
 func startEndpointWatcher(f *framework.Framework, q *endpointQueries) {
-	_, controller := controllerframework.NewInformer(
+	_, controller := cache.NewInformer(
 		&cache.ListWatch{
-			ListFunc: func(options api.ListOptions) (runtime.Object, error) {
-				return f.Client.Endpoints(f.Namespace.Name).List(options)
+			ListFunc: func(options v1.ListOptions) (runtime.Object, error) {
+				obj, err := f.ClientSet.Core().Endpoints(f.Namespace.Name).List(options)
+				return runtime.Object(obj), err
 			},
-			WatchFunc: func(options api.ListOptions) (watch.Interface, error) {
-				return f.Client.Endpoints(f.Namespace.Name).Watch(options)
+			WatchFunc: func(options v1.ListOptions) (watch.Interface, error) {
+				return f.ClientSet.Core().Endpoints(f.Namespace.Name).Watch(options)
 			},
 		},
-		&api.Endpoints{},
+		&v1.Endpoints{},
 		0,
-		controllerframework.ResourceEventHandlerFuncs{
+		cache.ResourceEventHandlerFuncs{
 			AddFunc: func(obj interface{}) {
-				if e, ok := obj.(*api.Endpoints); ok {
+				if e, ok := obj.(*v1.Endpoints); ok {
 					if len(e.Subsets) > 0 && len(e.Subsets[0].Addresses) > 0 {
 						q.added(e)
 					}
 				}
 			},
 			UpdateFunc: func(old, cur interface{}) {
-				if e, ok := cur.(*api.Endpoints); ok {
+				if e, ok := cur.(*v1.Endpoints); ok {
 					if len(e.Subsets) > 0 && len(e.Subsets[0].Addresses) > 0 {
 						q.added(e)
 					}
@@ -314,24 +316,23 @@ func startEndpointWatcher(f *framework.Framework, q *endpointQueries) {
 
 func singleServiceLatency(f *framework.Framework, name string, q *endpointQueries) (time.Duration, error) {
 	// Make a service that points to that pod.
-	svc := &api.Service{
-		ObjectMeta: api.ObjectMeta{
+	svc := &v1.Service{
+		ObjectMeta: v1.ObjectMeta{
 			GenerateName: "latency-svc-",
 		},
-		Spec: api.ServiceSpec{
-			Ports:           []api.ServicePort{{Protocol: api.ProtocolTCP, Port: 80}},
+		Spec: v1.ServiceSpec{
+			Ports:           []v1.ServicePort{{Protocol: v1.ProtocolTCP, Port: 80}},
 			Selector:        map[string]string{"name": name},
-			Type:            api.ServiceTypeClusterIP,
-			SessionAffinity: api.ServiceAffinityNone,
+			Type:            v1.ServiceTypeClusterIP,
+			SessionAffinity: v1.ServiceAffinityNone,
 		},
 	}
 	startTime := time.Now()
-	gotSvc, err := f.Client.Services(f.Namespace.Name).Create(svc)
+	gotSvc, err := f.ClientSet.Core().Services(f.Namespace.Name).Create(svc)
 	if err != nil {
 		return 0, err
 	}
 	framework.Logf("Created: %v", gotSvc.Name)
-	defer f.Client.Services(gotSvc.Namespace).Delete(gotSvc.Name)
 
 	if e := q.request(gotSvc.Name); e == nil {
 		return 0, fmt.Errorf("Never got a result for endpoint %v", gotSvc.Name)

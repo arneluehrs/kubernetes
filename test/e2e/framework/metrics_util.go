@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,7 +28,8 @@ import (
 	"time"
 
 	"k8s.io/kubernetes/pkg/api"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
+	"k8s.io/kubernetes/pkg/api/v1"
+	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/clientset"
 	"k8s.io/kubernetes/pkg/master/ports"
 	"k8s.io/kubernetes/pkg/metrics"
 	"k8s.io/kubernetes/pkg/util/sets"
@@ -41,14 +42,13 @@ const (
 	// NodeStartupThreshold is a rough estimate of the time allocated for a pod to start on a node.
 	NodeStartupThreshold = 4 * time.Second
 
-	podStartupThreshold           time.Duration = 5 * time.Second
-	listPodLatencySmallThreshold  time.Duration = 1 * time.Second
-	listPodLatencyMediumThreshold time.Duration = 1 * time.Second
-	listPodLatencyLargeThreshold  time.Duration = 1 * time.Second
-	// TODO: Decrease the small threshold to 250ms once tests are fixed.
-	apiCallLatencySmallThreshold  time.Duration = 500 * time.Millisecond
-	apiCallLatencyMediumThreshold time.Duration = 500 * time.Millisecond
-	apiCallLatencyLargeThreshold  time.Duration = 1 * time.Second
+	podStartupThreshold time.Duration = 5 * time.Second
+	// We are setting 1s threshold for apicalls even in small clusters to avoid flakes.
+	// The problem is that if long GC is happening in small clusters (where we have e.g.
+	// 1-core master machines) and tests are pretty short, it may consume significant
+	// portion of CPU and basically stop all the real work.
+	// Increasing threshold to 1s is within our SLO and should solve this problem.
+	apiCallLatencyThreshold time.Duration = 1 * time.Second
 )
 
 type MetricsForE2E metrics.MetricsCollection
@@ -58,6 +58,10 @@ func (m *MetricsForE2E) filterMetrics() {
 	for _, metric := range InterestingApiServerMetrics {
 		interestingApiServerMetrics[metric] = (*m).ApiServerMetrics[metric]
 	}
+	interestingControllerManagerMetrics := make(metrics.ControllerManagerMetrics)
+	for _, metric := range InterestingControllerManagerMetrics {
+		interestingControllerManagerMetrics[metric] = (*m).ControllerManagerMetrics[metric]
+	}
 	interestingKubeletMetrics := make(map[string]metrics.KubeletMetrics)
 	for kubelet, grabbed := range (*m).KubeletMetrics {
 		interestingKubeletMetrics[kubelet] = make(metrics.KubeletMetrics)
@@ -66,6 +70,7 @@ func (m *MetricsForE2E) filterMetrics() {
 		}
 	}
 	(*m).ApiServerMetrics = interestingApiServerMetrics
+	(*m).ControllerManagerMetrics = interestingControllerManagerMetrics
 	(*m).KubeletMetrics = interestingKubeletMetrics
 }
 
@@ -74,6 +79,12 @@ func (m *MetricsForE2E) PrintHumanReadable() string {
 	for _, interestingMetric := range InterestingApiServerMetrics {
 		buf.WriteString(fmt.Sprintf("For %v:\n", interestingMetric))
 		for _, sample := range (*m).ApiServerMetrics[interestingMetric] {
+			buf.WriteString(fmt.Sprintf("\t%v\n", metrics.PrintSample(sample)))
+		}
+	}
+	for _, interestingMetric := range InterestingControllerManagerMetrics {
+		buf.WriteString(fmt.Sprintf("For %v:\n", interestingMetric))
+		for _, sample := range (*m).ControllerManagerMetrics[interestingMetric] {
 			buf.WriteString(fmt.Sprintf("\t%v\n", metrics.PrintSample(sample)))
 		}
 	}
@@ -105,6 +116,12 @@ var InterestingApiServerMetrics = []string{
 	"etcd_request_latencies_summary",
 }
 
+var InterestingControllerManagerMetrics = []string{
+	"garbage_collector_event_processing_latency_microseconds",
+	"garbage_collector_dirty_processing_latency_microseconds",
+	"garbage_collector_orphan_processing_latency_microseconds",
+}
+
 var InterestingKubeletMetrics = []string{
 	"kubelet_container_manager_latency_microseconds",
 	"kubelet_docker_errors",
@@ -118,9 +135,10 @@ var InterestingKubeletMetrics = []string{
 
 // Dashboard metrics
 type LatencyMetric struct {
-	Perc50 time.Duration `json:"Perc50"`
-	Perc90 time.Duration `json:"Perc90"`
-	Perc99 time.Duration `json:"Perc99"`
+	Perc50  time.Duration `json:"Perc50"`
+	Perc90  time.Duration `json:"Perc90"`
+	Perc99  time.Duration `json:"Perc99"`
+	Perc100 time.Duration `json:"Perc100"`
 }
 
 type PodStartupLatency struct {
@@ -188,7 +206,7 @@ func setQuantile(metric *LatencyMetric, quantile float64, latency time.Duration)
 	}
 }
 
-func readLatencyMetrics(c *client.Client) (APIResponsiveness, error) {
+func readLatencyMetrics(c clientset.Interface) (APIResponsiveness, error) {
 	var a APIResponsiveness
 
 	body, err := getMetrics(c)
@@ -228,37 +246,9 @@ func readLatencyMetrics(c *client.Client) (APIResponsiveness, error) {
 	return a, err
 }
 
-// Returns threshold for API call depending on the size of the cluster.
-// In general our goal is 1s, but for smaller clusters, we want to enforce
-// smaller limits, to allow noticing regressions.
-func apiCallLatencyThreshold(numNodes int) time.Duration {
-	if numNodes <= 250 {
-		return apiCallLatencySmallThreshold
-	}
-	if numNodes <= 500 {
-		return apiCallLatencyMediumThreshold
-	}
-	return apiCallLatencyLargeThreshold
-}
-
-func listPodsLatencyThreshold(numNodes int) time.Duration {
-	if numNodes <= 250 {
-		return listPodLatencySmallThreshold
-	}
-	if numNodes <= 500 {
-		return listPodLatencyMediumThreshold
-	}
-	return listPodLatencyLargeThreshold
-}
-
 // Prints top five summary metrics for request types with latency and returns
 // number of such request types above threshold.
-func HighLatencyRequests(c *client.Client) (int, error) {
-	nodes, err := c.Nodes().List(api.ListOptions{})
-	if err != nil {
-		return 0, err
-	}
-	numNodes := len(nodes.Items)
+func HighLatencyRequests(c clientset.Interface) (int, error) {
 	metrics, err := readLatencyMetrics(c)
 	if err != nil {
 		return 0, err
@@ -267,13 +257,8 @@ func HighLatencyRequests(c *client.Client) (int, error) {
 	badMetrics := 0
 	top := 5
 	for _, metric := range metrics.APICalls {
-		threshold := apiCallLatencyThreshold(numNodes)
-		if metric.Verb == "LIST" && metric.Resource == "pods" {
-			threshold = listPodsLatencyThreshold(numNodes)
-		}
-
 		isBad := false
-		if metric.Latency.Perc99 > threshold {
+		if metric.Latency.Perc99 > apiCallLatencyThreshold {
 			badMetrics++
 			isBad = true
 		}
@@ -313,9 +298,9 @@ func VerifyPodStartupLatency(latency PodStartupLatency) error {
 }
 
 // Resets latency metrics in apiserver.
-func ResetMetrics(c *client.Client) error {
+func ResetMetrics(c clientset.Interface) error {
 	Logf("Resetting latency metrics in apiserver...")
-	body, err := c.Delete().AbsPath("/metrics").DoRaw()
+	body, err := c.Core().RESTClient().Delete().AbsPath("/metrics").DoRaw()
 	if err != nil {
 		return err
 	}
@@ -326,8 +311,8 @@ func ResetMetrics(c *client.Client) error {
 }
 
 // Retrieves metrics information.
-func getMetrics(c *client.Client) (string, error) {
-	body, err := c.Get().AbsPath("/metrics").DoRaw()
+func getMetrics(c clientset.Interface) (string, error) {
+	body, err := c.Core().RESTClient().Get().AbsPath("/metrics").DoRaw()
 	if err != nil {
 		return "", err
 	}
@@ -335,11 +320,11 @@ func getMetrics(c *client.Client) (string, error) {
 }
 
 // Retrieves scheduler metrics information.
-func getSchedulingLatency(c *client.Client) (SchedulingLatency, error) {
+func getSchedulingLatency(c clientset.Interface) (SchedulingLatency, error) {
 	result := SchedulingLatency{}
 
 	// Check if master Node is registered
-	nodes, err := c.Nodes().List(api.ListOptions{})
+	nodes, err := c.Core().Nodes().List(v1.ListOptions{})
 	ExpectNoError(err)
 
 	var data string
@@ -350,7 +335,7 @@ func getSchedulingLatency(c *client.Client) (SchedulingLatency, error) {
 		}
 	}
 	if masterRegistered {
-		rawData, err := c.Get().
+		rawData, err := c.Core().RESTClient().Get().
 			Prefix("proxy").
 			Namespace(api.NamespaceSystem).
 			Resource("pods").
@@ -399,7 +384,7 @@ func getSchedulingLatency(c *client.Client) (SchedulingLatency, error) {
 }
 
 // Verifies (currently just by logging them) the scheduling latencies.
-func VerifySchedulerLatency(c *client.Client) error {
+func VerifySchedulerLatency(c clientset.Interface) error {
 	latency, err := getSchedulingLatency(c)
 	if err != nil {
 		return err
@@ -426,10 +411,7 @@ func PrettyPrintJSON(metrics interface{}) string {
 
 // extractMetricSamples parses the prometheus metric samples from the input string.
 func extractMetricSamples(metricsBlob string) ([]*model.Sample, error) {
-	dec, err := expfmt.NewDecoder(strings.NewReader(metricsBlob), expfmt.FmtText)
-	if err != nil {
-		return nil, err
-	}
+	dec := expfmt.NewDecoder(strings.NewReader(metricsBlob), expfmt.FmtText)
 	decoder := expfmt.SampleDecoder{
 		Dec:  dec,
 		Opts: &expfmt.DecodeOptions{},
@@ -438,7 +420,7 @@ func extractMetricSamples(metricsBlob string) ([]*model.Sample, error) {
 	var samples []*model.Sample
 	for {
 		var v model.Vector
-		if err = decoder.Decode(&v); err != nil {
+		if err := decoder.Decode(&v); err != nil {
 			if err == io.EOF {
 				// Expected loop termination condition.
 				return samples, nil
@@ -470,18 +452,19 @@ func ExtractLatencyMetrics(latencies []PodLatencyData) LatencyMetric {
 	perc50 := latencies[int(math.Ceil(float64(length*50)/100))-1].Latency
 	perc90 := latencies[int(math.Ceil(float64(length*90)/100))-1].Latency
 	perc99 := latencies[int(math.Ceil(float64(length*99)/100))-1].Latency
-	return LatencyMetric{Perc50: perc50, Perc90: perc90, Perc99: perc99}
+	perc100 := latencies[length-1].Latency
+	return LatencyMetric{Perc50: perc50, Perc90: perc90, Perc99: perc99, Perc100: perc100}
 }
 
 // LogSuspiciousLatency logs metrics/docker errors from all nodes that had slow startup times
 // If latencyDataLag is nil then it will be populated from latencyData
-func LogSuspiciousLatency(latencyData []PodLatencyData, latencyDataLag []PodLatencyData, nodeCount int, c *client.Client) {
+func LogSuspiciousLatency(latencyData []PodLatencyData, latencyDataLag []PodLatencyData, nodeCount int, c clientset.Interface) {
 	if latencyDataLag == nil {
 		latencyDataLag = latencyData
 	}
 	for _, l := range latencyData {
 		if l.Latency > NodeStartupThreshold {
-			HighLatencyKubeletOperations(c, 1*time.Second, l.Node)
+			HighLatencyKubeletOperations(c, 1*time.Second, l.Node, Logf)
 		}
 	}
 	Logf("Approx throughput: %v pods/min",

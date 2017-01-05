@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,16 +19,16 @@ package rkt
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
-
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/types"
 
 	"github.com/coreos/go-systemd/dbus"
 	rktapi "github.com/coreos/rkt/api/v1alpha"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
+	"k8s.io/kubernetes/pkg/api/v1"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
+	"k8s.io/kubernetes/pkg/types"
 )
 
 // fakeRktInterface mocks the rktapi.PublicAPIClient interface for testing purpose.
@@ -107,9 +107,10 @@ func (f *fakeRktInterface) GetLogs(ctx context.Context, in *rktapi.GetLogsReques
 // See https://github.com/coreos/rkt/issues/1769.
 type fakeSystemd struct {
 	sync.Mutex
-	called  []string
-	version string
-	err     error
+	called           []string
+	resetFailedUnits []string
+	version          string
+	err              error
 }
 
 func newFakeSystemd() *fakeSystemd {
@@ -143,8 +144,10 @@ func (f *fakeSystemd) RestartUnit(name string, mode string, ch chan<- string) (i
 	return 0, fmt.Errorf("Not implemented")
 }
 
-func (f *fakeSystemd) Reload() error {
-	return fmt.Errorf("Not implemented")
+func (f *fakeSystemd) ResetFailedUnit(name string) error {
+	f.called = append(f.called, "ResetFailedUnit")
+	f.resetFailedUnits = append(f.resetFailedUnits, name)
+	return f.err
 }
 
 // fakeRuntimeHelper implementes kubecontainer.RuntimeHelper interfaces for testing purpose.
@@ -156,18 +159,63 @@ type fakeRuntimeHelper struct {
 	err         error
 }
 
-func (f *fakeRuntimeHelper) GenerateRunContainerOptions(pod *api.Pod, container *api.Container, podIP string) (*kubecontainer.RunContainerOptions, error) {
+func (f *fakeRuntimeHelper) GenerateRunContainerOptions(pod *v1.Pod, container *v1.Container, podIP string) (*kubecontainer.RunContainerOptions, error) {
 	return nil, fmt.Errorf("Not implemented")
 }
 
-func (f *fakeRuntimeHelper) GetClusterDNS(pod *api.Pod) ([]string, []string, error) {
+func (f *fakeRuntimeHelper) GetClusterDNS(pod *v1.Pod) ([]string, []string, error) {
 	return f.dnsServers, f.dnsSearches, f.err
 }
 
-func (f *fakeRuntimeHelper) GeneratePodHostNameAndDomain(pod *api.Pod) (string, string, error) {
+func (f *fakeRuntimeHelper) GeneratePodHostNameAndDomain(pod *v1.Pod) (string, string, error) {
 	return f.hostName, f.hostDomain, nil
 }
 
 func (f *fakeRuntimeHelper) GetPodDir(podUID types.UID) string {
 	return "/poddir/" + string(podUID)
+}
+
+func (f *fakeRuntimeHelper) GetExtraSupplementalGroupsForPod(pod *v1.Pod) []int64 {
+	return nil
+}
+
+type fakeRktCli struct {
+	sync.Mutex
+	cmds   []string
+	result []string
+	err    error
+}
+
+func newFakeRktCli() *fakeRktCli {
+	return &fakeRktCli{
+		cmds:   []string{},
+		result: []string{},
+	}
+}
+
+func (f *fakeRktCli) RunCommand(config *Config, args ...string) (result []string, err error) {
+	f.Lock()
+	defer f.Unlock()
+	cmd := append([]string{"rkt"}, args...)
+	f.cmds = append(f.cmds, strings.Join(cmd, " "))
+	return f.result, f.err
+}
+
+func (f *fakeRktCli) Reset() {
+	f.cmds = []string{}
+	f.result = []string{}
+	f.err = nil
+}
+
+type fakePodGetter struct {
+	pods map[types.UID]*v1.Pod
+}
+
+func newFakePodGetter() *fakePodGetter {
+	return &fakePodGetter{pods: make(map[types.UID]*v1.Pod)}
+}
+
+func (f fakePodGetter) GetPodByUID(uid types.UID) (*v1.Pod, bool) {
+	p, found := f.pods[uid]
+	return p, found
 }

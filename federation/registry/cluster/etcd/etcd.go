@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright 2016 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,18 +19,19 @@ package etcd
 import (
 	"k8s.io/kubernetes/federation/apis/federation"
 	"k8s.io/kubernetes/federation/registry/cluster"
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/rest"
+	genericapirequest "k8s.io/kubernetes/pkg/genericapiserver/api/request"
 	"k8s.io/kubernetes/pkg/registry/generic"
-	"k8s.io/kubernetes/pkg/registry/generic/registry"
+	genericregistry "k8s.io/kubernetes/pkg/registry/generic/registry"
 	"k8s.io/kubernetes/pkg/runtime"
 )
 
 type REST struct {
-	*registry.Store
+	*genericregistry.Store
 }
 
 type StatusREST struct {
-	store *registry.Store
+	store *genericregistry.Store
 }
 
 func (r *StatusREST) New() runtime.Object {
@@ -38,41 +39,29 @@ func (r *StatusREST) New() runtime.Object {
 }
 
 // Update alters the status subset of an object.
-func (r *StatusREST) Update(ctx api.Context, obj runtime.Object) (runtime.Object, bool, error) {
-	return r.store.Update(ctx, obj)
+func (r *StatusREST) Update(ctx genericapirequest.Context, name string, objInfo rest.UpdatedObjectInfo) (runtime.Object, bool, error) {
+	return r.store.Update(ctx, name, objInfo)
 }
 
 // NewREST returns a RESTStorage object that will work against clusters.
-func NewREST(opts generic.RESTOptions) (*REST, *StatusREST) {
-	prefix := "/clusters"
-
-	newListFunc := func() runtime.Object { return &federation.ClusterList{} }
-	storageInterface := opts.Decorator(
-		opts.Storage, 100, &federation.Cluster{}, prefix, cluster.Strategy, newListFunc)
-
-	store := &registry.Store{
+func NewREST(optsGetter generic.RESTOptionsGetter) (*REST, *StatusREST) {
+	store := &genericregistry.Store{
 		NewFunc:     func() runtime.Object { return &federation.Cluster{} },
-		NewListFunc: newListFunc,
-		KeyRootFunc: func(ctx api.Context) string {
-			return prefix
-		},
-		KeyFunc: func(ctx api.Context, name string) (string, error) {
-			return registry.NoNamespaceKeyFunc(ctx, prefix, name)
-		},
+		NewListFunc: func() runtime.Object { return &federation.ClusterList{} },
 		ObjectNameFunc: func(obj runtime.Object) (string, error) {
 			return obj.(*federation.Cluster).Name, nil
 		},
-		PredicateFunc:           cluster.MatchCluster,
-		QualifiedResource:       federation.Resource("clusters"),
-		DeleteCollectionWorkers: opts.DeleteCollectionWorkers,
+		PredicateFunc:     cluster.MatchCluster,
+		QualifiedResource: federation.Resource("clusters"),
 
-		CreateStrategy: cluster.Strategy,
-		UpdateStrategy: cluster.Strategy,
-		DeleteStrategy: cluster.Strategy,
-
+		CreateStrategy:      cluster.Strategy,
+		UpdateStrategy:      cluster.Strategy,
+		DeleteStrategy:      cluster.Strategy,
 		ReturnDeletedObject: true,
-
-		Storage: storageInterface,
+	}
+	options := &generic.StoreOptions{RESTOptions: optsGetter, AttrFunc: cluster.GetAttrs}
+	if err := store.CompleteWithOptions(options); err != nil {
+		panic(err) // TODO: Propagate error up
 	}
 
 	statusStore := *store

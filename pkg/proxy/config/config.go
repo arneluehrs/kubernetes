@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -108,7 +108,6 @@ func (c *EndpointsConfig) Channel(source string) chan EndpointsUpdate {
 		for update := range endpointsCh {
 			ch <- update
 		}
-		close(ch)
 	}()
 	return endpointsCh
 }
@@ -217,7 +216,6 @@ func (c *ServiceConfig) Channel(source string) chan ServiceUpdate {
 		for update := range serviceCh {
 			ch <- update
 		}
-		close(ch)
 	}()
 	return serviceCh
 }

@@ -1,37 +1,3 @@
-<!-- BEGIN MUNGE: UNVERSIONED_WARNING -->
-
-<!-- BEGIN STRIP_FOR_RELEASE -->
-
-<img src="http://kubernetes.io/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/img/warning.png" alt="WARNING"
-     width="25" height="25">
-
-<h2>PLEASE NOTE: This document applies to the HEAD of the source tree</h2>
-
-If you are using a released version of Kubernetes, you should
-refer to the docs that go with that version.
-
-<!-- TAG RELEASE_LINK, added by the munger automatically -->
-<strong>
-The latest release of this document can be found
-[here](http://releases.k8s.io/release-1.2/docs/api.md).
-
-Documentation for other releases can be found at
-[releases.k8s.io](http://releases.k8s.io).
-</strong>
---
-
-<!-- END STRIP_FOR_RELEASE -->
-
-<!-- END MUNGE: UNVERSIONED_WARNING -->
-
 # The Kubernetes API
 
 Primary system and API concepts are documented in the [User guide](user-guide/README.md).
@@ -47,6 +13,34 @@ The Kubernetes API also serves as the foundation for the declarative configurati
 Kubernetes also stores its serialized state (currently in [etcd](https://coreos.com/docs/distributed-configuration/getting-started-with-etcd/)) in terms of the API resources.
 
 Kubernetes itself is decomposed into multiple components, which interact through its API.
+
+## Adding APIs to Kubernetes
+
+Every API that is added to Kubernetes carries with it increased cost and complexity for all parts of the Kubernetes ecosystem.  New APIs imply new code to maintain,
+new tests that may flake, new documentation that users are required to understand, increased cognitive load for kubectl users and many other incremental costs.
+
+Of course, the addition of new APIs also enables new functionality that empowers users to simply do things that may have been previously complex, costly or both.
+
+Given this balance between increasing the complexity of the project versus the reduction of complexity in user actions, we have set out to set up a set of criteria
+to guide how we as a development community decide when an API should be added to the set of core Kubernetes APIs.
+
+The criteria for inclusion are as follows:
+   * Within the Kubernetes ecosystem, there is a single well known definition of such an API.  As an example, `cron` has a well understood and generally accepted
+specification, whereas there are countless different systems for definition workflows of dependent actions (e.g. Celery et al.).
+   * The API object is expected to be generally useful to greater than 50% of the Kubernetes users.  This is to ensure that we don't build up a collection of niche APIs
+that users rarely need.
+   * There is general consensus in the Kubernetes community that the API object is in the "Kubernetes layer".  See ["What is Kubernetes?"](http://kubernetes.io/docs/whatisk8s/) for a detailed
+explanation of what we believe the "Kubernetes layer" to be.
+
+Of course for every set of rules, we need to ensure that we are not hamstrung or limited by slavish devotion to those rules. Thus we also introduce two exceptions
+for adding APIs in Kubernetes that violate these criteria.
+
+These exceptions are:
+   * There is no other way to implement the functionality in Kubernetes. We are not sure there are any examples of this anymore, but we retain this exception just in case
+we have overlooked something.
+   * Exceptional circumstances, as judged by the Kubernetes committers and discussed in community meeting prior to inclusion of the API.  We hope (expect?) that this
+exception will be used rarely if at all.
+
 
 ## API changes
 
@@ -106,10 +100,10 @@ Currently there are two API groups in use:
   This holds types which will probably move to another API group eventually.
 1. the "componentconfig" and "metrics" API groups.
 
-
-In the future we expect that there will be more API groups, all at REST path `/apis/$API_GROUP` and
-using `apiVersion: $API_GROUP/$VERSION`.  We expect that there will be a way for [third parties to
-create their own API groups](design/extending-api.md), and to avoid naming collisions.
+In the future we expect that there will be more API groups, all at REST path `/apis/$API_GROUP` and using `apiVersion: $API_GROUP/$VERSION`.
+We expect that there will be a way for [third parties to create their own API groups](design/extending-api.md).
+To avoid naming collisions, third-party API groups must be a DNS name at least three segments long.
+New Kubernetes API groups are suffixed with `.k8s.io` (e.g. `storage.k8s.io`, `rbac.authorization.k8s.io`).
 
 ## Enabling resources in the extensions group
 
@@ -148,7 +142,7 @@ Some important differences between v1beta1/2 and v1beta3:
 * The resource `id` is now called `name`.
 * `name`, `labels`, `annotations`, and other metadata are now nested in a map called `metadata`
 * `desiredState` is now called `spec`, and `currentState` is now called `status`
-* `/minions` has been moved to `/nodes`, and the resource has kind `Node`
+* `/nodes` has been moved to `/nodes`, and the resource has kind `Node`
 * The namespace is required (for all namespaced resources) and has moved from a URL parameter to the path: `/api/v1beta3/namespaces/{namespace}/{resource_collection}/{resource_name}`. If you were not using a namespace before, use `default` here.
 * The names of all resource collections are now lower cased - instead of `replicationControllers`, use `replicationcontrollers`.
 * To watch for changes to a resource, open an HTTP or Websocket connection to the collection query and provide the `?watch=true` query parameter along with the desired `resourceVersion` parameter to watch from.

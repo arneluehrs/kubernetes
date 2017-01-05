@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright 2016 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"sync"
 
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/v1"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/kubelet/util/format"
 )
@@ -35,12 +35,12 @@ func NewFakeHandlerRunner() *FakeHandlerRunner {
 	return &FakeHandlerRunner{HandlerRuns: []string{}}
 }
 
-func (hr *FakeHandlerRunner) Run(containerID kubecontainer.ContainerID, pod *api.Pod, container *api.Container, handler *api.Handler) error {
+func (hr *FakeHandlerRunner) Run(containerID kubecontainer.ContainerID, pod *v1.Pod, container *v1.Container, handler *v1.Handler) (string, error) {
 	hr.Lock()
 	defer hr.Unlock()
 
 	if hr.Err != nil {
-		return hr.Err
+		return "", hr.Err
 	}
 
 	switch {
@@ -51,9 +51,9 @@ func (hr *FakeHandlerRunner) Run(containerID kubecontainer.ContainerID, pod *api
 	case handler.TCPSocket != nil:
 		hr.HandlerRuns = append(hr.HandlerRuns, fmt.Sprintf("tcp-socket on pod: %v, container: %v: %v", format.Pod(pod), container.Name, containerID.String()))
 	default:
-		return fmt.Errorf("Invalid handler: %v", handler)
+		return "", fmt.Errorf("Invalid handler: %v", handler)
 	}
-	return nil
+	return "", nil
 }
 
 func (hr *FakeHandlerRunner) Reset() {

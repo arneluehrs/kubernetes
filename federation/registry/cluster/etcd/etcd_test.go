@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright 2016 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,7 +21,6 @@ import (
 
 	"k8s.io/kubernetes/federation/apis/federation"
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/registry/generic"
@@ -31,11 +30,13 @@ import (
 )
 
 func newStorage(t *testing.T) (*REST, *etcdtesting.EtcdTestServer) {
-	etcdStorage, server := registrytest.NewEtcdStorage(t, federation.GroupName)
+	storageConfig, server := registrytest.NewEtcdStorage(t, federation.GroupName)
 	restOptions := generic.RESTOptions{
-		Storage:                 etcdStorage,
+		StorageConfig:           storageConfig,
 		Decorator:               generic.UndecoratedStorage,
-		DeleteCollectionWorkers: 1}
+		DeleteCollectionWorkers: 1,
+		ResourcePrefix:          "clusters",
+	}
 	storage, _ := NewREST(restOptions)
 	return storage, server
 }
@@ -49,7 +50,7 @@ func validNewCluster() *federation.Cluster {
 			},
 		},
 		Spec: federation.ClusterSpec{
-			ServerAddressByClientCIDRs: []unversioned.ServerAddressByClientCIDR{
+			ServerAddressByClientCIDRs: []federation.ServerAddressByClientCIDR{
 				{
 					ClientCIDR:    "0.0.0.0/0",
 					ServerAddress: "localhost:8888",
@@ -88,7 +89,9 @@ func TestUpdate(t *testing.T) {
 		// updateFunc
 		func(obj runtime.Object) runtime.Object {
 			object := obj.(*federation.Cluster)
-			object.Spec.Credential = "bar"
+			object.Spec.SecretRef = &api.LocalObjectReference{
+				Name: "bar",
+			}
 			return object
 		},
 	)

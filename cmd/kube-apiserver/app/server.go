@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,45 +23,47 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/golang/glog"
+	"github.com/pborman/uuid"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
 	"k8s.io/kubernetes/cmd/kube-apiserver/app/options"
 	"k8s.io/kubernetes/pkg/admission"
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/unversioned"
-	apiv1 "k8s.io/kubernetes/pkg/api/v1"
-	appsapi "k8s.io/kubernetes/pkg/apis/apps/v1alpha1"
 	"k8s.io/kubernetes/pkg/apis/autoscaling"
-	autoscalingapiv1 "k8s.io/kubernetes/pkg/apis/autoscaling/v1"
 	"k8s.io/kubernetes/pkg/apis/batch"
-	batchapiv1 "k8s.io/kubernetes/pkg/apis/batch/v1"
 	"k8s.io/kubernetes/pkg/apis/extensions"
-	extensionsapiv1beta1 "k8s.io/kubernetes/pkg/apis/extensions/v1beta1"
-	"k8s.io/kubernetes/pkg/apiserver"
-	"k8s.io/kubernetes/pkg/apiserver/authenticator"
 	"k8s.io/kubernetes/pkg/capabilities"
-	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
-	"k8s.io/kubernetes/pkg/client/restclient"
+	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	"k8s.io/kubernetes/pkg/cloudprovider"
+	"k8s.io/kubernetes/pkg/controller/informers"
 	serviceaccountcontroller "k8s.io/kubernetes/pkg/controller/serviceaccount"
+	generatedopenapi "k8s.io/kubernetes/pkg/generated/openapi"
 	"k8s.io/kubernetes/pkg/genericapiserver"
-	kubeletclient "k8s.io/kubernetes/pkg/kubelet/client"
+	"k8s.io/kubernetes/pkg/genericapiserver/filters"
+	kubeadmission "k8s.io/kubernetes/pkg/kubeapiserver/admission"
+	kubeauthenticator "k8s.io/kubernetes/pkg/kubeapiserver/authenticator"
 	"k8s.io/kubernetes/pkg/master"
 	"k8s.io/kubernetes/pkg/registry/cachesize"
-	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/serviceaccount"
+	"k8s.io/kubernetes/pkg/runtime/schema"
+	utilerrors "k8s.io/kubernetes/pkg/util/errors"
+	utilnet "k8s.io/kubernetes/pkg/util/net"
+	"k8s.io/kubernetes/pkg/util/sets"
+	"k8s.io/kubernetes/pkg/util/wait"
+	"k8s.io/kubernetes/pkg/version"
 )
 
 // NewAPIServerCommand creates a *cobra.Command object with default parameters
 func NewAPIServerCommand() *cobra.Command {
-	s := options.NewAPIServer()
+	s := options.NewServerRunOptions()
 	s.AddFlags(pflag.CommandLine)
 	cmd := &cobra.Command{
 		Use: "kube-apiserver",
@@ -77,11 +79,37 @@ cluster's shared state through which all other components interact.`,
 }
 
 // Run runs the specified APIServer.  This should never exit.
-func Run(s *options.APIServer) error {
-	genericapiserver.DefaultAndValidateRunOptions(s.ServerRunOptions)
+func Run(s *options.ServerRunOptions) error {
+	// set defaults
+	if err := s.GenericServerRunOptions.DefaultAdvertiseAddress(s.SecureServing, s.InsecureServing); err != nil {
+		return err
+	}
+	serviceIPRange, apiServerServiceIP, err := master.DefaultServiceIPRange(s.ServiceClusterIPRange)
+	if err != nil {
+		return fmt.Errorf("error determining service IP ranges: %v", err)
+	}
+	if err := s.SecureServing.MaybeDefaultWithSelfSignedCerts(s.GenericServerRunOptions.AdvertiseAddress.String(), apiServerServiceIP); err != nil {
+		return fmt.Errorf("error creating self-signed certificates: %v", err)
+	}
+	if err := s.GenericServerRunOptions.DefaultExternalHost(); err != nil {
+		return fmt.Errorf("error setting the external host value: %v", err)
+	}
 
-	if len(s.StorageConfig.ServerList) == 0 {
-		glog.Fatalf("--etcd-servers must be specified")
+	// validate options
+	if errs := s.Validate(); len(errs) != 0 {
+		return utilerrors.NewAggregate(errs)
+	}
+
+	// create config from options
+	genericConfig := genericapiserver.NewConfig().
+		ApplyOptions(s.GenericServerRunOptions).
+		ApplyInsecureServingOptions(s.InsecureServing)
+
+	if _, err := genericConfig.ApplySecureServingOptions(s.SecureServing); err != nil {
+		return fmt.Errorf("failed to configure https: %s", err)
+	}
+	if err = s.Authentication.Apply(genericConfig); err != nil {
+		return fmt.Errorf("failed to configure authentication: %s", err)
 	}
 
 	capabilities.Initialize(capabilities.Capabilities{
@@ -95,24 +123,23 @@ func Run(s *options.APIServer) error {
 		PerConnectionBandwidthLimitBytesPerSec: s.MaxConnectionBytesPerSec,
 	})
 
-	cloud, err := cloudprovider.InitCloudProvider(s.CloudProvider, s.CloudConfigFile)
-	if err != nil {
-		glog.Fatalf("Cloud provider could not be initialized: %v", err)
-	}
-
 	// Setup tunneler if needed
 	var tunneler genericapiserver.Tunneler
-	var proxyDialerFn apiserver.ProxyDialerFunc
+	var proxyDialerFn utilnet.DialFunc
 	if len(s.SSHUser) > 0 {
 		// Get ssh key distribution func, if supported
 		var installSSH genericapiserver.InstallSSHKey
+		cloud, err := cloudprovider.InitCloudProvider(s.GenericServerRunOptions.CloudProvider, s.GenericServerRunOptions.CloudConfigFile)
+		if err != nil {
+			return fmt.Errorf("cloud provider could not be initialized: %v", err)
+		}
 		if cloud != nil {
 			if instances, supported := cloud.Instances(); supported {
 				installSSH = instances.AddSSHKeyToAllInstances
 			}
 		}
 		if s.KubeletConfig.Port == 0 {
-			glog.Fatalf("Must enable kubelet port if proxy ssh-tunneling is specified.")
+			return fmt.Errorf("must enable kubelet port if proxy ssh-tunneling is specified")
 		}
 		// Set up the tunneler
 		// TODO(cjcullen): If we want this to handle per-kubelet ports or other
@@ -133,50 +160,43 @@ func Run(s *options.APIServer) error {
 	// Proxying to pods and services is IP-based... don't expect to be able to verify the hostname
 	proxyTLSClientConfig := &tls.Config{InsecureSkipVerify: true}
 
-	kubeletClient, err := kubeletclient.NewStaticKubeletClient(&s.KubeletConfig)
-	if err != nil {
-		glog.Fatalf("Failure to start kubelet client: %v", err)
-	}
+	if s.Etcd.StorageConfig.DeserializationCacheSize == 0 {
+		// When size of cache is not explicitly set, estimate its size based on
+		// target memory usage.
+		glog.V(2).Infof("Initalizing deserialization cache size based on %dMB limit", s.GenericServerRunOptions.TargetRAMMB)
 
-	apiResourceConfigSource, err := parseRuntimeConfig(s)
-	if err != nil {
-		glog.Fatalf("error in parsing runtime-config: %s", err)
-	}
-
-	clientConfig := &restclient.Config{
-		Host: net.JoinHostPort(s.InsecureBindAddress.String(), strconv.Itoa(s.InsecurePort)),
-		// Increase QPS limits. The client is currently passed to all admission plugins,
-		// and those can be throttled in case of higher load on apiserver - see #22340 and #22422
-		// for more details. Once #22422 is fixed, we may want to remove it.
-		QPS:   50,
-		Burst: 100,
-	}
-	if len(s.DeprecatedStorageVersion) != 0 {
-		gv, err := unversioned.ParseGroupVersion(s.DeprecatedStorageVersion)
-		if err != nil {
-			glog.Fatalf("error in parsing group version: %s", err)
+		// This is the heuristics that from memory capacity is trying to infer
+		// the maximum number of nodes in the cluster and set cache sizes based
+		// on that value.
+		// From our documentation, we officially recomment 120GB machines for
+		// 2000 nodes, and we scale from that point. Thus we assume ~60MB of
+		// capacity per node.
+		// TODO: We may consider deciding that some percentage of memory will
+		// be used for the deserialization cache and divide it by the max object
+		// size to compute its size. We may even go further and measure
+		// collective sizes of the objects in the cache.
+		clusterSize := s.GenericServerRunOptions.TargetRAMMB / 60
+		s.Etcd.StorageConfig.DeserializationCacheSize = 25 * clusterSize
+		if s.Etcd.StorageConfig.DeserializationCacheSize < 1000 {
+			s.Etcd.StorageConfig.DeserializationCacheSize = 1000
 		}
-		clientConfig.GroupVersion = &gv
 	}
 
-	client, err := clientset.NewForConfig(clientConfig)
+	storageGroupsToEncodingVersion, err := s.GenericServerRunOptions.StorageGroupsToEncodingVersion()
 	if err != nil {
-		glog.Errorf("Failed to create clientset: %v", err)
+		return fmt.Errorf("error generating storage version map: %s", err)
 	}
-
-	resourceEncoding := genericapiserver.NewDefaultResourceEncodingConfig()
-	groupToEncoding, err := s.StorageGroupsToEncodingVersion()
+	storageFactory, err := genericapiserver.BuildDefaultStorageFactory(
+		s.Etcd.StorageConfig, s.GenericServerRunOptions.DefaultStorageMediaType, api.Codecs,
+		genericapiserver.NewDefaultResourceEncodingConfig(), storageGroupsToEncodingVersion,
+		// FIXME: this GroupVersionResource override should be configurable
+		[]schema.GroupVersionResource{batch.Resource("cronjobs").WithVersion("v2alpha1")},
+		master.DefaultAPIResourceConfigSource(), s.GenericServerRunOptions.RuntimeConfig)
 	if err != nil {
-		glog.Fatalf("error getting group encoding: %s", err)
+		return fmt.Errorf("error in initializing storage factory: %s", err)
 	}
-	for group, storageEncodingVersion := range groupToEncoding {
-		resourceEncoding.SetVersionEncoding(group, storageEncodingVersion, unversioned.GroupVersion{Group: group, Version: runtime.APIVersionInternal})
-	}
-
-	storageFactory := genericapiserver.NewDefaultStorageFactory(s.StorageConfig, api.Codecs, resourceEncoding, apiResourceConfigSource)
-	storageFactory.AddCohabitatingResources(batch.Resource("jobs"), extensions.Resource("jobs"))
 	storageFactory.AddCohabitatingResources(autoscaling.Resource("horizontalpodautoscalers"), extensions.Resource("horizontalpodautoscalers"))
-	for _, override := range s.EtcdServersOverrides {
+	for _, override := range s.Etcd.EtcdServersOverrides {
 		tokens := strings.Split(override, "#")
 		if len(tokens) != 2 {
 			glog.Errorf("invalid value of etcd server overrides: %s", override)
@@ -190,198 +210,128 @@ func Run(s *options.APIServer) error {
 		}
 		group := apiresource[0]
 		resource := apiresource[1]
-		groupResource := unversioned.GroupResource{Group: group, Resource: resource}
+		groupResource := schema.GroupResource{Group: group, Resource: resource}
 
 		servers := strings.Split(tokens[1], ";")
 		storageFactory.SetEtcdLocation(groupResource, servers)
 	}
 
 	// Default to the private server key for service account token signing
-	if s.ServiceAccountKeyFile == "" && s.TLSPrivateKeyFile != "" {
-		if authenticator.IsValidServiceAccountKeyFile(s.TLSPrivateKeyFile) {
-			s.ServiceAccountKeyFile = s.TLSPrivateKeyFile
+	if len(s.Authentication.ServiceAccounts.KeyFiles) == 0 && s.SecureServing.ServerCert.CertKey.KeyFile != "" {
+		if kubeauthenticator.IsValidServiceAccountKeyFile(s.SecureServing.ServerCert.CertKey.KeyFile) {
+			s.Authentication.ServiceAccounts.KeyFiles = []string{s.SecureServing.ServerCert.CertKey.KeyFile}
 		} else {
-			glog.Warning("No RSA key provided, service account token authentication disabled")
+			glog.Warning("No TLS key provided, service account token authentication disabled")
 		}
 	}
 
-	var serviceAccountGetter serviceaccount.ServiceAccountTokenGetter
-	if s.ServiceAccountLookup {
+	authenticatorConfig := s.Authentication.ToAuthenticationConfig()
+	if s.Authentication.ServiceAccounts.Lookup {
 		// If we need to look up service accounts and tokens,
 		// go directly to etcd to avoid recursive auth insanity
-		storage, err := storageFactory.New(api.Resource("serviceaccounts"))
+		storageConfig, err := storageFactory.NewConfig(api.Resource("serviceaccounts"))
 		if err != nil {
-			glog.Fatalf("Unable to get serviceaccounts storage: %v", err)
+			return fmt.Errorf("unable to get serviceaccounts storage: %v", err)
 		}
-		serviceAccountGetter = serviceaccountcontroller.NewGetterFromStorageInterface(storage)
+		authenticatorConfig.ServiceAccountTokenGetter = serviceaccountcontroller.NewGetterFromStorageInterface(storageConfig, storageFactory.ResourcePrefix(api.Resource("serviceaccounts")), storageFactory.ResourcePrefix(api.Resource("secrets")))
 	}
 
-	authenticator, err := authenticator.New(authenticator.AuthenticatorConfig{
-		BasicAuthFile:             s.BasicAuthFile,
-		ClientCAFile:              s.ClientCAFile,
-		TokenAuthFile:             s.TokenAuthFile,
-		OIDCIssuerURL:             s.OIDCIssuerURL,
-		OIDCClientID:              s.OIDCClientID,
-		OIDCCAFile:                s.OIDCCAFile,
-		OIDCUsernameClaim:         s.OIDCUsernameClaim,
-		OIDCGroupsClaim:           s.OIDCGroupsClaim,
-		ServiceAccountKeyFile:     s.ServiceAccountKeyFile,
-		ServiceAccountLookup:      s.ServiceAccountLookup,
-		ServiceAccountTokenGetter: serviceAccountGetter,
-		KeystoneURL:               s.KeystoneURL,
+	apiAuthenticator, securityDefinitions, err := authenticatorConfig.New()
+	if err != nil {
+		return fmt.Errorf("invalid Authentication Config: %v", err)
+	}
+
+	privilegedLoopbackToken := uuid.NewRandom().String()
+	selfClientConfig, err := genericapiserver.NewSelfClientConfig(genericConfig.SecureServingInfo, genericConfig.InsecureServingInfo, privilegedLoopbackToken)
+	if err != nil {
+		return fmt.Errorf("failed to create clientset: %v", err)
+	}
+	client, err := internalclientset.NewForConfig(selfClientConfig)
+	if err != nil {
+		kubeAPIVersions := os.Getenv("KUBE_API_VERSIONS")
+		if len(kubeAPIVersions) == 0 {
+			return fmt.Errorf("failed to create clientset: %v", err)
+		}
+
+		// KUBE_API_VERSIONS is used in test-update-storage-objects.sh, disabling a number of API
+		// groups. This leads to a nil client above and undefined behaviour further down.
+		// TODO: get rid of KUBE_API_VERSIONS or define sane behaviour if set
+		glog.Errorf("Failed to create clientset with KUBE_API_VERSIONS=%q. KUBE_API_VERSIONS is only for testing. Things will break.", kubeAPIVersions)
+	}
+	sharedInformers := informers.NewSharedInformerFactory(nil, client, 10*time.Minute)
+
+	authorizationConfig := s.Authorization.ToAuthorizationConfig(sharedInformers)
+	apiAuthorizer, err := authorizationConfig.New()
+	if err != nil {
+		return fmt.Errorf("invalid Authorization Config: %v", err)
+	}
+
+	admissionControlPluginNames := strings.Split(s.GenericServerRunOptions.AdmissionControl, ",")
+	pluginInitializer := kubeadmission.NewPluginInitializer(client, sharedInformers, apiAuthorizer)
+	admissionController, err := admission.NewFromPlugins(admissionControlPluginNames, s.GenericServerRunOptions.AdmissionControlConfigFile, pluginInitializer)
+	if err != nil {
+		return fmt.Errorf("failed to initialize plugins: %v", err)
+	}
+
+	proxyTransport := utilnet.SetTransportDefaults(&http.Transport{
+		Dial:            proxyDialerFn,
+		TLSClientConfig: proxyTLSClientConfig,
 	})
+	kubeVersion := version.Get()
 
-	if err != nil {
-		glog.Fatalf("Invalid Authentication Config: %v", err)
-	}
-
-	authorizationModeNames := strings.Split(s.AuthorizationMode, ",")
-	authorizer, err := apiserver.NewAuthorizerFromAuthorizationConfig(authorizationModeNames, s.AuthorizationConfig)
-	if err != nil {
-		glog.Fatalf("Invalid Authorization Config: %v", err)
-	}
-
-	admissionControlPluginNames := strings.Split(s.AdmissionControl, ",")
-	admissionController := admission.NewFromPlugins(client, admissionControlPluginNames, s.AdmissionControlConfigFile)
-
-	if len(s.ExternalHost) == 0 {
-		// TODO: extend for other providers
-		if s.CloudProvider == "gce" {
-			instances, supported := cloud.Instances()
-			if !supported {
-				glog.Fatalf("GCE cloud provider has no instances.  this shouldn't happen. exiting.")
-			}
-			name, err := os.Hostname()
-			if err != nil {
-				glog.Fatalf("Failed to get hostname: %v", err)
-			}
-			addrs, err := instances.NodeAddresses(name)
-			if err != nil {
-				glog.Warningf("Unable to obtain external host address from cloud provider: %v", err)
-			} else {
-				for _, addr := range addrs {
-					if addr.Type == api.NodeExternalIP {
-						s.ExternalHost = addr.Address
-					}
-				}
-			}
-		}
-	}
-
-	genericConfig := genericapiserver.NewConfig(s.ServerRunOptions)
-	// TODO: Move the following to generic api server as well.
-	genericConfig.StorageFactory = storageFactory
-	genericConfig.Authenticator = authenticator
-	genericConfig.SupportsBasicAuth = len(s.BasicAuthFile) > 0
-	genericConfig.Authorizer = authorizer
+	genericConfig.Version = &kubeVersion
+	genericConfig.LoopbackClientConfig = selfClientConfig
+	genericConfig.Authenticator = apiAuthenticator
+	genericConfig.Authorizer = apiAuthorizer
 	genericConfig.AdmissionControl = admissionController
-	genericConfig.APIResourceConfigSource = apiResourceConfigSource
-	genericConfig.MasterServiceNamespace = s.MasterServiceNamespace
-	genericConfig.ProxyDialer = proxyDialerFn
-	genericConfig.ProxyTLSClientConfig = proxyTLSClientConfig
-	genericConfig.Serializer = api.Codecs
+	genericConfig.OpenAPIConfig = genericapiserver.DefaultOpenAPIConfig(generatedopenapi.OpenAPIDefinitions)
+	genericConfig.OpenAPIConfig.SecurityDefinitions = securityDefinitions
+	genericConfig.OpenAPIConfig.Info.Title = "Kubernetes"
+	genericConfig.SwaggerConfig = genericapiserver.DefaultSwaggerConfig()
+	genericConfig.EnableMetrics = true
+	genericConfig.LongRunningFunc = filters.BasicLongRunningRequestCheck(
+		sets.NewString("watch", "proxy"),
+		sets.NewString("attach", "exec", "proxy", "log", "portforward"),
+	)
 
 	config := &master.Config{
-		Config:                  genericConfig,
+		GenericConfig: genericConfig,
+
+		APIResourceConfigSource: storageFactory.APIResourceConfigSource,
+		StorageFactory:          storageFactory,
+		EnableWatchCache:        s.GenericServerRunOptions.EnableWatchCache,
 		EnableCoreControllers:   true,
-		DeleteCollectionWorkers: s.DeleteCollectionWorkers,
+		DeleteCollectionWorkers: s.GenericServerRunOptions.DeleteCollectionWorkers,
 		EventTTL:                s.EventTTL,
-		KubeletClient:           kubeletClient,
+		KubeletClientConfig:     s.KubeletConfig,
+		EnableUISupport:         true,
+		EnableLogsSupport:       true,
+		ProxyTransport:          proxyTransport,
 
 		Tunneler: tunneler,
+
+		ServiceIPRange:       serviceIPRange,
+		APIServerServiceIP:   apiServerServiceIP,
+		APIServerServicePort: 443,
+
+		ServiceNodePortRange:      s.ServiceNodePortRange,
+		KubernetesServiceNodePort: s.KubernetesServiceNodePort,
+
+		MasterCount: s.MasterCount,
 	}
 
-	if s.EnableWatchCache {
-		cachesize.SetWatchCacheSizes(s.WatchCacheSizes)
+	if s.GenericServerRunOptions.EnableWatchCache {
+		glog.V(2).Infof("Initalizing cache sizes based on %dMB limit", s.GenericServerRunOptions.TargetRAMMB)
+		cachesize.InitializeWatchCacheSizes(s.GenericServerRunOptions.TargetRAMMB)
+		cachesize.SetWatchCacheSizes(s.GenericServerRunOptions.WatchCacheSizes)
 	}
 
-	m, err := master.New(config)
+	m, err := config.Complete().New()
 	if err != nil {
 		return err
 	}
 
-	m.Run(s.ServerRunOptions)
+	sharedInformers.Start(wait.NeverStop)
+	m.GenericAPIServer.PrepareRun().Run(wait.NeverStop)
 	return nil
-}
-
-func getRuntimeConfigValue(s *options.APIServer, apiKey string, defaultValue bool) bool {
-	flagValue, ok := s.RuntimeConfig[apiKey]
-	if ok {
-		if flagValue == "" {
-			return true
-		}
-		boolValue, err := strconv.ParseBool(flagValue)
-		if err != nil {
-			glog.Fatalf("Invalid value of %s: %s, err: %v", apiKey, flagValue, err)
-		}
-		return boolValue
-	}
-	return defaultValue
-}
-
-// Parses the given runtime-config and formats it into genericapiserver.APIResourceConfigSource
-func parseRuntimeConfig(s *options.APIServer) (genericapiserver.APIResourceConfigSource, error) {
-	v1GroupVersionString := "api/v1"
-	extensionsGroupVersionString := extensionsapiv1beta1.SchemeGroupVersion.String()
-	versionToResourceSpecifier := map[unversioned.GroupVersion]string{
-		apiv1.SchemeGroupVersion:                v1GroupVersionString,
-		extensionsapiv1beta1.SchemeGroupVersion: extensionsGroupVersionString,
-		batchapiv1.SchemeGroupVersion:           batchapiv1.SchemeGroupVersion.String(),
-		autoscalingapiv1.SchemeGroupVersion:     autoscalingapiv1.SchemeGroupVersion.String(),
-		appsapi.SchemeGroupVersion:              appsapi.SchemeGroupVersion.String(),
-	}
-
-	resourceConfig := master.DefaultAPIResourceConfigSource()
-
-	// "api/all=false" allows users to selectively enable specific api versions.
-	enableAPIByDefault := true
-	allAPIFlagValue, ok := s.RuntimeConfig["api/all"]
-	if ok && allAPIFlagValue == "false" {
-		enableAPIByDefault = false
-	}
-
-	// "api/legacy=false" allows users to disable legacy api versions.
-	disableLegacyAPIs := false
-	legacyAPIFlagValue, ok := s.RuntimeConfig["api/legacy"]
-	if ok && legacyAPIFlagValue == "false" {
-		disableLegacyAPIs = true
-	}
-	_ = disableLegacyAPIs // hush the compiler while we don't have legacy APIs to disable.
-
-	// "<resourceSpecifier>={true|false} allows users to enable/disable API.
-	// This takes preference over api/all and api/legacy, if specified.
-	for version, resourceSpecifier := range versionToResourceSpecifier {
-		enableVersion := getRuntimeConfigValue(s, resourceSpecifier, enableAPIByDefault)
-		if enableVersion {
-			resourceConfig.EnableVersions(version)
-		} else {
-			resourceConfig.DisableVersions(version)
-		}
-	}
-
-	for key := range s.RuntimeConfig {
-		tokens := strings.Split(key, "/")
-		if len(tokens) != 3 {
-			continue
-		}
-
-		switch {
-		case strings.HasPrefix(key, extensionsGroupVersionString+"/"):
-			if !resourceConfig.AnyResourcesForVersionEnabled(extensionsapiv1beta1.SchemeGroupVersion) {
-				return nil, fmt.Errorf("%v is disabled, you cannot configure its resources individually", extensionsapiv1beta1.SchemeGroupVersion)
-			}
-
-			resource := strings.TrimPrefix(key, extensionsGroupVersionString+"/")
-			if getRuntimeConfigValue(s, key, false) {
-				resourceConfig.EnableResources(extensionsapiv1beta1.SchemeGroupVersion.WithResource(resource))
-			} else {
-				resourceConfig.DisableResources(extensionsapiv1beta1.SchemeGroupVersion.WithResource(resource))
-			}
-
-		default:
-			// TODO enable individual resource capability for all GroupVersionResources
-			return nil, fmt.Errorf("%v resources cannot be enabled/disabled individually", key)
-		}
-	}
-	return resourceConfig, nil
 }

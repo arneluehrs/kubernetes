@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import (
 
 	internal "k8s.io/kubernetes/pkg/api"
 	api "k8s.io/kubernetes/pkg/api/v1"
+	metav1 "k8s.io/kubernetes/pkg/apis/meta/v1"
 	"k8s.io/kubernetes/pkg/runtime"
 )
 
@@ -143,6 +144,48 @@ func TestSortingPrinter(t *testing.T) {
 				},
 			},
 			field: "{.metadata.name}",
+		},
+		{
+			name: "random-order-timestamp",
+			obj: &api.PodList{
+				Items: []api.Pod{
+					{
+						ObjectMeta: api.ObjectMeta{
+							CreationTimestamp: metav1.Unix(300, 0),
+						},
+					},
+					{
+						ObjectMeta: api.ObjectMeta{
+							CreationTimestamp: metav1.Unix(100, 0),
+						},
+					},
+					{
+						ObjectMeta: api.ObjectMeta{
+							CreationTimestamp: metav1.Unix(200, 0),
+						},
+					},
+				},
+			},
+			sort: &api.PodList{
+				Items: []api.Pod{
+					{
+						ObjectMeta: api.ObjectMeta{
+							CreationTimestamp: metav1.Unix(100, 0),
+						},
+					},
+					{
+						ObjectMeta: api.ObjectMeta{
+							CreationTimestamp: metav1.Unix(200, 0),
+						},
+					},
+					{
+						ObjectMeta: api.ObjectMeta{
+							CreationTimestamp: metav1.Unix(300, 0),
+						},
+					},
+				},
+			},
+			field: "{.metadata.creationTimestamp}",
 		},
 		{
 			name: "random-order-numbers",

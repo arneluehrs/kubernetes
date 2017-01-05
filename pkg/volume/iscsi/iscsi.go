@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,11 +17,12 @@ limitations under the License.
 package iscsi
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/golang/glog"
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/v1"
 	"k8s.io/kubernetes/pkg/types"
 	"k8s.io/kubernetes/pkg/util/exec"
 	"k8s.io/kubernetes/pkg/util/mount"
@@ -52,8 +53,21 @@ func (plugin *iscsiPlugin) Init(host volume.VolumeHost) error {
 	return nil
 }
 
-func (plugin *iscsiPlugin) Name() string {
+func (plugin *iscsiPlugin) GetPluginName() string {
 	return iscsiPluginName
+}
+
+func (plugin *iscsiPlugin) GetVolumeName(spec *volume.Spec) (string, error) {
+	volumeSource, _, err := getVolumeSource(spec)
+	if err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf(
+		"%v:%v:%v",
+		volumeSource.TargetPortal,
+		volumeSource.IQN,
+		volumeSource.Lun), nil
 }
 
 func (plugin *iscsiPlugin) CanSupport(spec *volume.Spec) bool {
@@ -64,14 +78,18 @@ func (plugin *iscsiPlugin) CanSupport(spec *volume.Spec) bool {
 	return true
 }
 
-func (plugin *iscsiPlugin) GetAccessModes() []api.PersistentVolumeAccessMode {
-	return []api.PersistentVolumeAccessMode{
-		api.ReadWriteOnce,
-		api.ReadOnlyMany,
+func (plugin *iscsiPlugin) RequiresRemount() bool {
+	return false
+}
+
+func (plugin *iscsiPlugin) GetAccessModes() []v1.PersistentVolumeAccessMode {
+	return []v1.PersistentVolumeAccessMode{
+		v1.ReadWriteOnce,
+		v1.ReadOnlyMany,
 	}
 }
 
-func (plugin *iscsiPlugin) NewMounter(spec *volume.Spec, pod *api.Pod, _ volume.VolumeOptions) (volume.Mounter, error) {
+func (plugin *iscsiPlugin) NewMounter(spec *volume.Spec, pod *v1.Pod, _ volume.VolumeOptions) (volume.Mounter, error) {
 	// Inject real implementations here, test through the internal function.
 	return plugin.newMounterInternal(spec, pod.UID, &ISCSIUtil{}, plugin.host.GetMounter())
 }
@@ -79,14 +97,9 @@ func (plugin *iscsiPlugin) NewMounter(spec *volume.Spec, pod *api.Pod, _ volume.
 func (plugin *iscsiPlugin) newMounterInternal(spec *volume.Spec, podUID types.UID, manager diskManager, mounter mount.Interface) (volume.Mounter, error) {
 	// iscsi volumes used directly in a pod have a ReadOnly flag set by the pod author.
 	// iscsi volumes used as a PersistentVolume gets the ReadOnly flag indirectly through the persistent-claim volume used to mount the PV
-	var readOnly bool
-	var iscsi *api.ISCSIVolumeSource
-	if spec.Volume != nil && spec.Volume.ISCSI != nil {
-		iscsi = spec.Volume.ISCSI
-		readOnly = iscsi.ReadOnly
-	} else {
-		iscsi = spec.PersistentVolume.Spec.ISCSI
-		readOnly = spec.ReadOnly
+	iscsi, readOnly, err := getVolumeSource(spec)
+	if err != nil {
+		return nil, err
 	}
 
 	lun := strconv.Itoa(int(iscsi.Lun))
@@ -133,6 +146,19 @@ func (plugin *iscsiPlugin) execCommand(command string, args []string) ([]byte, e
 	return cmd.CombinedOutput()
 }
 
+func (plugin *iscsiPlugin) ConstructVolumeSpec(volumeName, mountPath string) (*volume.Spec, error) {
+	iscsiVolume := &v1.Volume{
+		Name: volumeName,
+		VolumeSource: v1.VolumeSource{
+			ISCSI: &v1.ISCSIVolumeSource{
+				TargetPortal: volumeName,
+				IQN:          volumeName,
+			},
+		},
+	}
+	return volume.NewSpecFromVolume(iscsiVolume), nil
+}
+
 type iscsiDisk struct {
 	volName string
 	podUID  types.UID
@@ -170,6 +196,13 @@ func (b *iscsiDiskMounter) GetAttributes() volume.Attributes {
 	}
 }
 
+// Checks prior to mount operations to verify that the required components (binaries, etc.)
+// to mount the volume are available on the underlying node.
+// If not, it returns an error
+func (b *iscsiDiskMounter) CanMount() error {
+	return nil
+}
+
 func (b *iscsiDiskMounter) SetUp(fsGroup *int64) error {
 	return b.SetUpAt(b.GetPath(), fsGroup)
 }
@@ -205,4 +238,15 @@ func portalMounter(portal string) string {
 		portal = portal + ":3260"
 	}
 	return portal
+}
+
+func getVolumeSource(spec *volume.Spec) (*v1.ISCSIVolumeSource, bool, error) {
+	if spec.Volume != nil && spec.Volume.ISCSI != nil {
+		return spec.Volume.ISCSI, spec.Volume.ISCSI.ReadOnly, nil
+	} else if spec.PersistentVolume != nil &&
+		spec.PersistentVolume.Spec.ISCSI != nil {
+		return spec.PersistentVolume.Spec.ISCSI, spec.ReadOnly, nil
+	}
+
+	return nil, false, fmt.Errorf("Spec does not reference an ISCSI volume type")
 }

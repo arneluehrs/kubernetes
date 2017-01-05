@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -59,8 +59,8 @@ func toRuntimeContainer(c *dockertypes.Container) (*kubecontainer.Container, err
 		ID:      kubecontainer.DockerID(c.ID).ContainerID(),
 		Name:    dockerName.ContainerName,
 		Image:   c.Image,
+		ImageID: c.ImageID,
 		Hash:    hash,
-		Created: c.Created,
 		// (random-liu) docker uses status to indicate whether a container is running or exited.
 		// However, in kubernetes we usually use state to indicate whether a container is running or exited,
 		// while use status to indicate the comprehensive status of the container. So we have different naming
@@ -76,8 +76,9 @@ func toRuntimeImage(image *dockertypes.Image) (*kubecontainer.Image, error) {
 	}
 
 	return &kubecontainer.Image{
-		ID:       image.ID,
-		RepoTags: image.RepoTags,
-		Size:     image.VirtualSize,
+		ID:          image.ID,
+		RepoTags:    image.RepoTags,
+		RepoDigests: image.RepoDigests,
+		Size:        image.VirtualSize,
 	}, nil
 }

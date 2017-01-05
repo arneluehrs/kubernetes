@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,14 +19,14 @@ package genericapiserver
 import (
 	"testing"
 
-	"k8s.io/kubernetes/pkg/api/unversioned"
+	"k8s.io/kubernetes/pkg/runtime/schema"
 )
 
 func TestDisabledVersion(t *testing.T) {
-	g1v1 := unversioned.GroupVersion{Group: "group1", Version: "version1"}
-	g1v2 := unversioned.GroupVersion{Group: "group1", Version: "version2"}
-	g2v1 := unversioned.GroupVersion{Group: "group2", Version: "version1"}
-	g3v1 := unversioned.GroupVersion{Group: "group3", Version: "version1"}
+	g1v1 := schema.GroupVersion{Group: "group1", Version: "version1"}
+	g1v2 := schema.GroupVersion{Group: "group1", Version: "version2"}
+	g2v1 := schema.GroupVersion{Group: "group2", Version: "version1"}
+	g3v1 := schema.GroupVersion{Group: "group3", Version: "version1"}
 
 	resourceType := "the-resource"
 	disabledResourceType := "the-disabled-resource"
@@ -38,11 +38,11 @@ func TestDisabledVersion(t *testing.T) {
 	config.EnableResources(g1v1.WithResource(resourceType), g2v1.WithResource(resourceType))
 	config.DisableResources(g1v2.WithResource(disabledResourceType))
 
-	expectedEnabledResources := []unversioned.GroupVersionResource{
+	expectedEnabledResources := []schema.GroupVersionResource{
 		g1v2.WithResource(resourceType),
 		g2v1.WithResource(resourceType),
 	}
-	expectedDisabledResources := []unversioned.GroupVersionResource{
+	expectedDisabledResources := []schema.GroupVersionResource{
 		g1v1.WithResource(resourceType), g1v1.WithResource(disabledResourceType),
 		g1v2.WithResource(disabledResourceType),
 		g2v1.WithResource(disabledResourceType),
@@ -78,10 +78,10 @@ func TestDisabledVersion(t *testing.T) {
 		t.Errorf("expected %v, got %v", e, a)
 	}
 
-	expectedEnabledAnyVersionResources := []unversioned.GroupResource{
+	expectedEnabledAnyVersionResources := []schema.GroupResource{
 		{Group: "group1", Resource: resourceType},
 	}
-	expectedDisabledAnyResources := []unversioned.GroupResource{
+	expectedDisabledAnyResources := []schema.GroupResource{
 		{Group: "group1", Resource: disabledResourceType},
 	}
 
@@ -96,4 +96,65 @@ func TestDisabledVersion(t *testing.T) {
 		}
 	}
 
+}
+
+func TestAnyResourcesForGroupEnabled(t *testing.T) {
+	tests := []struct {
+		name      string
+		creator   func() APIResourceConfigSource
+		testGroup string
+
+		expectedResult bool
+	}{
+		{
+			name: "empty",
+			creator: func() APIResourceConfigSource {
+				return NewResourceConfig()
+			},
+			testGroup: "one",
+
+			expectedResult: false,
+		},
+		{
+			name: "present, but disabled",
+			creator: func() APIResourceConfigSource {
+				ret := NewResourceConfig()
+				ret.DisableVersions(schema.GroupVersion{Group: "one", Version: "version1"})
+				return ret
+			},
+			testGroup: "one",
+
+			expectedResult: false,
+		},
+		{
+			name: "present, and one version enabled",
+			creator: func() APIResourceConfigSource {
+				ret := NewResourceConfig()
+				ret.DisableVersions(schema.GroupVersion{Group: "one", Version: "version1"})
+				ret.EnableVersions(schema.GroupVersion{Group: "one", Version: "version2"})
+				return ret
+			},
+			testGroup: "one",
+
+			expectedResult: true,
+		},
+		{
+			name: "present, and one resource",
+			creator: func() APIResourceConfigSource {
+				ret := NewResourceConfig()
+				ret.DisableVersions(schema.GroupVersion{Group: "one", Version: "version1"})
+				ret.EnableResources(schema.GroupVersionResource{Group: "one", Version: "version2", Resource: "foo"})
+				return ret
+			},
+			testGroup: "one",
+
+			expectedResult: true,
+		},
+	}
+
+	for _, tc := range tests {
+		if e, a := tc.expectedResult, tc.creator().AnyResourcesForGroupEnabled(tc.testGroup); e != a {
+			t.Errorf("%s: expected %v, got %v", tc.name, e, a)
+		}
+	}
 }

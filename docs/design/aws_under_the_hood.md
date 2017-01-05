@@ -1,37 +1,3 @@
-<!-- BEGIN MUNGE: UNVERSIONED_WARNING -->
-
-<!-- BEGIN STRIP_FOR_RELEASE -->
-
-<img src="http://kubernetes.io/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/img/warning.png" alt="WARNING"
-     width="25" height="25">
-
-<h2>PLEASE NOTE: This document applies to the HEAD of the source tree</h2>
-
-If you are using a released version of Kubernetes, you should
-refer to the docs that go with that version.
-
-<!-- TAG RELEASE_LINK, added by the munger automatically -->
-<strong>
-The latest release of this document can be found
-[here](http://releases.k8s.io/release-1.2/docs/design/aws_under_the_hood.md).
-
-Documentation for other releases can be found at
-[releases.k8s.io](http://releases.k8s.io).
-</strong>
---
-
-<!-- END STRIP_FOR_RELEASE -->
-
-<!-- END MUNGE: UNVERSIONED_WARNING -->
-
 # Peeking under the hood of Kubernetes on AWS
 
 This document provides high-level insight into how Kubernetes works on AWS and
@@ -64,8 +30,8 @@ you manually created or configured your cluster.
 ### Architecture overview
 
 Kubernetes is a cluster of several machines that consists of a Kubernetes
-master and a set number of nodes (previously known as 'minions') for which the
-master which is responsible. See the [Architecture](architecture.md) topic for
+master and a set number of nodes (previously known as 'nodes') for which the
+master is responsible. See the [Architecture](architecture.md) topic for
 more details.
 
 By default on AWS:
@@ -93,6 +59,9 @@ volume, and so nodes on AWS use instance storage.  Instance storage is cheaper,
 often faster, and historically more reliable. Unless you can make do with
 whatever space is left on your root partition, you must choose an instance type
 that provides you with sufficient instance storage for your needs.
+
+To configure Kubernetes to use EBS storage, pass the environment variable
+`KUBE_AWS_STORAGE=ebs` to kube-up.
 
 Note: The master uses a persistent volume ([etcd](architecture.md#etcd)) to
 track its state. Similar to nodes, containers are mostly run against instance
@@ -139,7 +108,8 @@ pods.
 
 ELB has some restrictions:
 * ELB requires that all nodes listen on a single port,
-* ELB acts as a forwarding proxy (i.e. the source IP is not preserved).
+* ELB acts as a forwarding proxy (i.e. the source IP is not preserved, but see below
+on ELB annotations for pods speaking HTTP).
 
 To work with these restrictions, in Kubernetes, [LoadBalancer
 services](../user-guide/services.md#type-loadbalancer) are exposed as
@@ -160,14 +130,40 @@ Note that we do not automatically open NodePort services in the AWS firewall
 NodePort services are more of a building block for things like inter-cluster
 services or for LoadBalancer. To consume a NodePort service externally, you
 will likely have to open the port in the node security group
-(`kubernetes-minion-<clusterid>`).
+(`kubernetes-node-<clusterid>`).
+
+For SSL support, starting with 1.3 two annotations can be added to a service:
+
+```
+service.beta.kubernetes.io/aws-load-balancer-ssl-cert=arn:aws:acm:us-east-1:123456789012:certificate/12345678-1234-1234-1234-123456789012
+```
+
+The first specifies which certificate to use. It can be either a
+certificate from a third party issuer that was uploaded to IAM or one created
+within AWS Certificate Manager.
+
+```
+service.beta.kubernetes.io/aws-load-balancer-backend-protocol=(https|http|ssl|tcp)
+```
+
+The second annotation specifies which protocol a pod speaks. For HTTPS and
+SSL, the ELB will expect the pod to authenticate itself over the encrypted
+connection.
+
+HTTP and HTTPS will select layer 7 proxying: the ELB will terminate
+the connection with the user, parse headers and inject the `X-Forwarded-For`
+header with the user's IP address (pods will only see the IP address of the
+ELB at the other end of its connection) when forwarding requests.
+
+TCP and SSL will select layer 4 proxying: the ELB will forward traffic without
+modifying the headers.
 
 ### Identity and Access Management (IAM)
 
 kube-proxy sets up two IAM roles, one for the master called
 [kubernetes-master](../../cluster/aws/templates/iam/kubernetes-master-policy.json)
 and one for the nodes called
-[kubernetes-minion](../../cluster/aws/templates/iam/kubernetes-minion-policy.json).
+[kubernetes-node](../../cluster/aws/templates/iam/kubernetes-minion-policy.json).
 
 The master is responsible for creating ELBs and configuring them, as well as
 setting up advanced VPC routing. Currently it has blanket permissions on EC2,
@@ -202,7 +198,7 @@ Within the AWS cloud provider logic, we filter requests to the AWS APIs to
 match resources with our cluster tag. By filtering the requests, we ensure
 that we see only our own AWS objects.
 
-** Important: ** If you choose not to use kube-up, you must pick a unique
+**Important:** If you choose not to use kube-up, you must pick a unique
 cluster-id value, and ensure that all AWS resources have a tag with
 `Name=KubernetesCluster,Value=<clusterid>`.
 
@@ -215,7 +211,7 @@ HTTP URLs are passed to instances; this is how Kubernetes code gets onto the
 machines.
 * Creates two IAM profiles based on templates in [cluster/aws/templates/iam](../../cluster/aws/templates/iam/):
     * `kubernetes-master` is used by the master.
-    * `kubernetes-minion` is used by nodes.
+    * `kubernetes-node` is used by nodes.
 * Creates an AWS SSH key named `kubernetes-<fingerprint>`. Fingerprint here is
 the OpenSSH key fingerprint, so that multiple users can run the script with
 different keys and their keys will not collide (with near-certainty). It will
@@ -238,7 +234,7 @@ The debate is open here, where cluster-per-AZ is discussed as more robust but
 cross-AZ-clusters are more convenient.
 * Associates the subnet to the route table
 * Creates security groups for the master (`kubernetes-master-<clusterid>`)
-and the nodes (`kubernetes-minion-<clusterid>`).
+and the nodes (`kubernetes-node-<clusterid>`).
 * Configures security groups so that masters and nodes can communicate. This
 includes intercommunication between masters and nodes, opening SSH publicly
 for both masters and nodes, and opening port 443 on the master for the HTTPS
@@ -254,8 +250,8 @@ information that must be passed in this way.
 routing rule for the internal network range (`MASTER_IP_RANGE`, defaults to
 10.246.0.0/24).
 * For auto-scaling, on each nodes it creates a launch configuration and group.
-The name for both is <*KUBE_AWS_INSTANCE_PREFIX*>-minion-group. The default
-name is kubernetes-minion-group. The auto-scaling group has a min and max size
+The name for both is <*KUBE_AWS_INSTANCE_PREFIX*>-node-group. The default
+name is kubernetes-node-group. The auto-scaling group has a min and max size
 that are both set to NUM_NODES. You can change the size of the auto-scaling
 group to add or remove the total number of nodes from within the AWS API or
 Console. Each nodes self-configures, meaning that they come up; run Salt with
@@ -306,6 +302,7 @@ concatenates some of the scripts found in the cluster/aws/templates directory.
 These scripts are responsible for mounting and formatting volumes, downloading
 Salt and Kubernetes from the S3 bucket, and then triggering Salt to actually
 install Kubernetes.
+
 
 
 <!-- BEGIN MUNGE: GENERATED_ANALYTICS -->
